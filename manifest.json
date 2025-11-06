@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Chat Booster for GPT Chats",
   "description": "Boost performance on very long GPT chats by aggressive virtualization.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
