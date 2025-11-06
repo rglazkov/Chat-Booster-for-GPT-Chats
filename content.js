@@ -19,6 +19,7 @@
 
   const originalHTML = new WeakMap();
   const collapsedFlag = new WeakMap();
+  const userExpanded = new WeakSet();
 
   // HUD (fixed, bottom-right)
   let hudEl = null;
@@ -90,6 +91,7 @@
     el.style.contain = 'content';
     el.style.contentVisibility = 'auto';
     collapsedFlag.set(el, true);
+    userExpanded.delete(el);
   }
 
   function expandMessage(el) {
@@ -127,15 +129,21 @@
 
     // Only last N expanded; everything else collapsed
     messageNodes.forEach((el, idx) => {
-      if (isNearTail(idx, messageNodes.length)) expandMessage(el);
-      else collapseMessage(el);
+      if (isNearTail(idx, messageNodes.length)) {
+        expandMessage(el);
+      } else if (!userExpanded.has(el)) {
+        collapseMessage(el);
+      }
     });
     updateHUD();
   }
 
   function expandAllAndDisable() {
     if (io) io.disconnect();
-    messageNodes.forEach(el => expandMessage(el));
+    messageNodes.forEach(el => {
+      expandMessage(el);
+      userExpanded.delete(el);
+    });
     updateHUD();
   }
 
@@ -144,7 +152,9 @@
     if (!ph) return;
     const container = ph.parentElement;
     if (!container) return;
+    const wasCollapsed = collapsedFlag.get(container);
     expandMessage(container);
+    if (wasCollapsed) userExpanded.add(container);
     container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     updateHUD();
   }, { passive: true });
