@@ -9,9 +9,8 @@ Keeps only the last 10 messages expanded; everything else turns into ultra-light
 - Minimal permissions, MV3, no data collection
 
 **Install (unpacked)**
-1. Run `./scripts/generate-icons.sh` to materialize the icon PNGs.
-2. Open `chrome://extensions` → enable *Developer mode*.
-3. Click *Load unpacked* → select the project folder.
+1. Open `chrome://extensions` → enable *Developer mode*.
+2. Click *Load unpacked* → select the project folder.
 
 **Keyboard**
 - `Ctrl + Shift + V` — toggle ON/OFF.
