@@ -23,11 +23,20 @@
 
   const SELECTORS = [
     '[data-testid="conversation-turn"]',
-    '[data-message-id]',
-    'div[role="listitem"]',
-    'main .group.w-full',
+    '[data-testid*="conversation-turn"]',
+    '[data-testid="conversation-message"]',
+    '[data-testid*="conversation-message"]',
+    '[data-testid="chat-message"]',
+    '[data-testid*="chat-message"]',
     '[data-testid="message-bubble"]',
-    '[data-message-author-role]'
+    '[data-message-id]',
+    '[data-entry-id]',
+    '[data-message-author-role]',
+    'div[role="listitem"]',
+    'li[role="listitem"]',
+    'section[role="listitem"]',
+    'article[role="listitem"]',
+    'main .group.w-full'
   ];
 
   let enabled = true;
@@ -590,7 +599,12 @@
   }
 
   function isChatPage() {
-    return /chatgpt\.com|chat\.openai\.com/.test(location.host);
+    const host = (location?.hostname || location?.host || '').toLowerCase();
+    if (!host) return false;
+    return host === 'chat.openai.com'
+      || host.endsWith('.chat.openai.com')
+      || host === 'chatgpt.com'
+      || host.endsWith('.chatgpt.com');
   }
   function getScrollTop() {
     if (rootScrollEl instanceof Element) {
@@ -599,13 +613,36 @@
     return window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
   }
   function findScrollRoot() {
-    return document.querySelector('main') || document.scrollingElement || document.documentElement;
+    const candidates = [
+      document.querySelector('[data-testid="conversation-scroll-container"]'),
+      document.querySelector('[data-testid="conversation-scroll"]'),
+      document.querySelector('[data-testid="scroll-container"]'),
+      document.querySelector('[data-testid="page"]'),
+      document.querySelector('main'),
+      document.scrollingElement,
+      document.documentElement,
+      document.body
+    ];
+    for (const node of candidates) {
+      if (node) return node;
+    }
+    return document.documentElement;
   }
   function normalizeMessageNode(el) {
     if (!el) return null;
     const candidates = [
       el.closest('[data-testid="conversation-turn"]'),
+      el.closest('[data-testid*="conversation-turn"]'),
+      el.closest('[data-testid="conversation-message"]'),
+      el.closest('[data-testid*="conversation-message"]'),
+      el.closest('[data-testid="chat-message"]'),
+      el.closest('[data-testid*="chat-message"]'),
       el.closest('[data-message-id]'),
+      el.closest('[data-entry-id]'),
+      el.closest('[data-message-author-role]'),
+      el.closest('article[role="listitem"]'),
+      el.closest('section[role="listitem"]'),
+      el.closest('li[role="listitem"]'),
       el.closest('div[role="listitem"]'),
       el.closest('main .group.w-full')
     ];
