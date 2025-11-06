@@ -12,7 +12,9 @@
     '[data-testid="conversation-turn"]',
     '[data-message-id]',
     'div[role="listitem"]',
-    'main .group.w-full'
+    'main .group.w-full',
+    '[data-testid="message-bubble"]',
+    '[data-message-author-role]'
   ];
 
   let enabled = true;
@@ -35,9 +37,9 @@
   let hudTailLabelEl = null;
   let hudSettingsEl = null;
   let hudTailInputEl = null;
-  let hudToggleBtn = null;
   let dragState = null;
   let hudPosition = null;
+  let hudSettingsVisible = false;
 
   function clampTail(value) {
     const num = Math.floor(Number(value));
@@ -105,45 +107,34 @@
     const topRow = document.createElement('div');
     topRow.style.display = 'flex';
     topRow.style.alignItems = 'center';
-    topRow.style.gap = '6px';
 
     hudStatusEl = document.createElement('span');
     hudStatusEl.style.whiteSpace = 'nowrap';
     topRow.appendChild(hudStatusEl);
 
+    const controlsRow = document.createElement('div');
+    controlsRow.style.display = 'flex';
+    controlsRow.style.alignItems = 'center';
+    controlsRow.style.gap = '8px';
+    controlsRow.style.marginTop = '6px';
+
     hudTailLabelEl = document.createElement('button');
     hudTailLabelEl.type = 'button';
     hudTailLabelEl.style.background = 'transparent';
-    hudTailLabelEl.style.border = '1px solid currentColor';
+    hudTailLabelEl.style.border = '0';
     hudTailLabelEl.style.borderRadius = '8px';
-    hudTailLabelEl.style.padding = '2px 6px';
+    hudTailLabelEl.style.padding = '0';
     hudTailLabelEl.style.font = '11px/1.2 system-ui, sans-serif';
     hudTailLabelEl.style.color = 'inherit';
     hudTailLabelEl.style.cursor = 'pointer';
+    hudTailLabelEl.style.textDecoration = 'underline';
     hudTailLabelEl.setAttribute('aria-haspopup', 'true');
     hudTailLabelEl.addEventListener('click', () => {
       hudSettingsVisible = !hudSettingsVisible;
       if (hudSettingsEl) hudSettingsEl.style.display = hudSettingsVisible ? 'flex' : 'none';
       updateHUD();
     });
-    topRow.appendChild(hudTailLabelEl);
-
-    hudToggleBtn = document.createElement('button');
-    hudToggleBtn.type = 'button';
-    hudToggleBtn.textContent = '×';
-    hudToggleBtn.setAttribute('aria-label', 'Collapse menu');
-    hudToggleBtn.style.display = 'none';
-    hudToggleBtn.style.background = 'transparent';
-    hudToggleBtn.style.border = '0';
-    hudToggleBtn.style.cursor = 'pointer';
-    hudToggleBtn.style.fontSize = '12px';
-    hudToggleBtn.style.padding = '2px';
-    hudToggleBtn.addEventListener('click', () => {
-      hudSettingsVisible = false;
-      if (hudSettingsEl) hudSettingsEl.style.display = 'none';
-      updateHUD();
-    });
-    topRow.appendChild(hudToggleBtn);
+    controlsRow.appendChild(hudTailLabelEl);
 
     hudSettingsEl = document.createElement('div');
     hudSettingsEl.style.display = 'none';
@@ -181,6 +172,7 @@
     hudSettingsEl.appendChild(label);
 
     hudEl.appendChild(topRow);
+    hudEl.appendChild(controlsRow);
     hudEl.appendChild(hudSettingsEl);
     document.documentElement.appendChild(hudEl);
 
@@ -207,9 +199,8 @@
       const indicator = hudSettingsVisible ? '▴' : '▾';
       hudTailLabelEl.textContent = `Tail: ${maxAlwaysVisibleTail} ${indicator}`;
       hudTailLabelEl.setAttribute('aria-expanded', String(hudSettingsVisible));
-      if (hudSettingsVisible && hudToggleBtn) hudToggleBtn.style.display = 'inline';
-      else if (hudToggleBtn) hudToggleBtn.style.display = 'none';
     }
+    if (hudSettingsEl) hudSettingsEl.style.display = hudSettingsVisible ? 'flex' : 'none';
     if (hudTailInputEl) hudTailInputEl.value = maxAlwaysVisibleTail;
   }
 
@@ -292,15 +283,46 @@
   function findScrollRoot() {
     return document.querySelector('main') || document.scrollingElement || document.documentElement;
   }
-  function pickMessageNodes() {
-    const found = new Set();
-    for (const sel of SELECTORS) {
-      document.querySelectorAll(sel).forEach(el => {
-        if (el && el.nodeType === 1 && el.offsetParent !== null) found.add(el);
-      });
-      if (found.size > 0) break;
+  function normalizeMessageNode(el) {
+    if (!el) return null;
+    const candidates = [
+      el.closest('[data-testid="conversation-turn"]'),
+      el.closest('[data-message-id]'),
+      el.closest('div[role="listitem"]'),
+      el.closest('main .group.w-full')
+    ];
+    for (const cand of candidates) {
+      if (cand) return cand;
     }
-    return Array.from(found);
+    return el;
+  }
+
+  function byDomOrder(a, b) {
+    if (a === b) return 0;
+    const pos = a.compareDocumentPosition(b);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  }
+
+  function pickMessageNodes() {
+    const seen = new Set();
+    const result = [];
+    const root = document.querySelector('main') || document.body || document.documentElement;
+    if (!root) return result;
+    for (const sel of SELECTORS) {
+      root.querySelectorAll(sel).forEach(node => {
+        const container = normalizeMessageNode(node);
+        if (!container || seen.has(container)) return;
+        if (container.classList?.contains('cv-placeholder')) return;
+        const style = container instanceof Element ? window.getComputedStyle(container) : null;
+        if (style && (style.display === 'none' || style.visibility === 'hidden')) return;
+        seen.add(container);
+        result.push(container);
+      });
+    }
+    if (result.length > 1) result.sort(byDomOrder);
+    return result;
   }
   function isNearTail(index, total) {
     return index >= total - maxAlwaysVisibleTail;
