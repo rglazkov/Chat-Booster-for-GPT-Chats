@@ -49,12 +49,14 @@
   let lastScanAt = 0;
 
   let maxAlwaysVisibleTail = MAX_ALWAYS_VISIBLE_TAIL;
+  let virtualizationInProgress = false;
 
   const originalHTML = new WeakMap();
   const collapsedFlag = new WeakMap();
   const userExpanded = new WeakSet();
   let visibleNodes = new WeakSet();
   let collapsedTotal = 0;
+  let collapsedCountDirty = true;
   let lastHudOptimizedCount = null;
   const placeholderForNode = new WeakMap();
   const nodeForPlaceholder = new WeakMap();
@@ -78,40 +80,45 @@
   let hudTailInputFocused = false;
 
   function markCollapsed(el) {
-    if (!el) return;
+    if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
-    if (!wasCollapsed) {
-      collapsedTotal += 1;
-      collapsedFlag.set(el, true);
-    } else {
-      collapsedFlag.set(el, true);
-    }
+    collapsedFlag.set(el, true);
+    if (!wasCollapsed) collapsedCountDirty = true;
+    return !wasCollapsed;
   }
 
   function markExpanded(el) {
-    if (!el) return;
+    if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
-    if (wasCollapsed) {
-      collapsedTotal = Math.max(0, collapsedTotal - 1);
-    }
+    if (wasCollapsed) collapsedCountDirty = true;
     collapsedFlag.delete(el);
+    return wasCollapsed;
   }
 
   function forgetCollapsed(el) {
-    if (!el) return;
+    if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
-    if (wasCollapsed) {
-      collapsedTotal = Math.max(0, collapsedTotal - 1);
-    }
+    if (wasCollapsed) collapsedCountDirty = true;
     collapsedFlag.delete(el);
+    return wasCollapsed;
   }
 
-  function syncCollapsedCount() {
+  function syncCollapsedCount(options) {
+    const opts = typeof options === 'object' && options !== null ? options : {};
+    const force = opts.force === true;
+    const silent = opts.silent === true;
+    if (!collapsedCountDirty && !force) return collapsedTotal;
     let next = 0;
     for (const el of messageNodes) {
       if (collapsedFlag.get(el)) next += 1;
     }
+    collapsedCountDirty = false;
+    const changed = collapsedTotal !== next;
     collapsedTotal = next;
+    if (changed && !virtualizationInProgress && !silent) {
+      updateHUD();
+    }
+    return collapsedTotal;
   }
 
   function clampTail(value) {
@@ -255,11 +262,18 @@
       return;
     }
     if (changed) {
-      messageNodes.forEach(el => { expandMessage(el); });
-      document.querySelectorAll('.cv-placeholder').forEach(ph => {
-        const container = nodeForPlaceholder.get(ph);
-        if (container) expandMessage(container);
-      });
+      const prevState = virtualizationInProgress;
+      virtualizationInProgress = true;
+      try {
+        messageNodes.forEach(el => { expandMessage(el); });
+        document.querySelectorAll('.cv-placeholder').forEach(ph => {
+          const container = nodeForPlaceholder.get(ph);
+          if (container) expandMessage(container);
+        });
+      } finally {
+        virtualizationInProgress = prevState;
+      }
+      syncCollapsedCount({ force: true });
       lastScanAt = 0;
       virtualizationDirty = true;
       virtualize();
@@ -464,7 +478,7 @@
 
   function updateHUD() {
     if (!hudEl) return;
-    const optimizedCount = Math.max(0, collapsedTotal);
+    const optimizedCount = Math.max(0, syncCollapsedCount({ silent: true }));
     if (hudStatusEl && (lastHudOptimizedCount === null || lastHudOptimizedCount !== optimizedCount || !hudStatusEl.textContent)) {
       hudStatusEl.textContent = `Chat Booster: ${optimizedCount} optimized`;
     }
@@ -644,6 +658,7 @@
     });
     messageNodesDirty = false;
     messageRevision += 1;
+    collapsedCountDirty = true;
   }
 
   function addMessageNode(node) {
@@ -658,6 +673,7 @@
     messageNodes.sort(byDomOrder);
     messageRevision += 1;
     virtualizationDirty = true;
+    collapsedCountDirty = true;
     return true;
   }
 
@@ -681,11 +697,13 @@
       }
     }
     detachedInfo.delete(container);
-    forgetCollapsed(container);
+    const removedCollapsed = forgetCollapsed(container);
     userExpanded.delete(container);
     visibleNodes.delete(container);
     virtualizationDirty = true;
     messageRevision += 1;
+    if (!virtualizationInProgress && removedCollapsed) syncCollapsedCount();
+    collapsedCountDirty = true;
     return true;
   }
   function isNearTail(index, total) {
@@ -877,6 +895,7 @@
   }
 
   function cleanupOrphanPlaceholders() {
+    let touched = false;
     document.querySelectorAll('.cv-placeholder').forEach(ph => {
       const container = nodeForPlaceholder.get(ph);
       const info = container ? detachedInfo.get(container) : null;
@@ -884,11 +903,12 @@
         nodeForPlaceholder.delete(ph);
         if (container) {
           placeholderForNode.delete(container);
-          forgetCollapsed(container);
+          if (forgetCollapsed(container)) touched = true;
         }
         ph.remove();
       }
     });
+    if (touched && !virtualizationInProgress) syncCollapsedCount();
   }
 
   function collapseMessage(el) {
@@ -925,9 +945,10 @@
     el.style.contentVisibility = 'hidden';
     el.dataset.cvCollapsed = '1';
     detachedInfo.delete(el);
-    markCollapsed(el);
+    const changed = markCollapsed(el);
     userExpanded.delete(el);
     visibleNodes.delete(el);
+    if (!virtualizationInProgress && changed) syncCollapsedCount();
   }
 
   function collapseMessageUltra(el) {
@@ -973,20 +994,24 @@
     }
     el.dataset.cvCollapsed = '1';
     detachedInfo.set(el, { parent, placeholder, height });
-    markCollapsed(el);
+    const changed = markCollapsed(el);
     userExpanded.delete(el);
     visibleNodes.delete(el);
+    if (!virtualizationInProgress && changed) syncCollapsedCount();
   }
 
   function expandMessage(el) {
     if (!collapsedFlag.get(el)) return;
-    const placeholder = placeholderForNode.get(el);
     const info = detachedInfo.get(el);
-    if (info && placeholder) {
-      const parent = placeholder.parentElement || info.parent;
-      if (parent) {
-        parent.insertBefore(el, placeholder);
-      }
+    let placeholder = placeholderForNode.get(el);
+    if (!placeholder && info?.placeholder instanceof HTMLElement) {
+      placeholder = info.placeholder;
+      placeholderForNode.set(el, placeholder);
+      nodeForPlaceholder.set(placeholder, el);
+    }
+    const parent = placeholder?.parentElement || info?.parent || null;
+    if (parent) {
+      parent.insertBefore(el, placeholder || info?.placeholder?.nextSibling || null);
     } else if (info?.parent) {
       info.parent.insertBefore(el, info.placeholder?.nextSibling || null);
     } else {
@@ -995,17 +1020,21 @@
     }
     if (placeholder?.parentElement) {
       placeholder.parentElement.removeChild(placeholder);
+    } else if (info?.placeholder?.parentElement) {
+      info.placeholder.parentElement.removeChild(info.placeholder);
     }
     if (placeholder) {
       placeholder.style.display = 'none';
       placeholder.dataset.cvDetached = '0';
+      stylePlaceholderAppearance(placeholder);
     }
     el.style.removeProperty('display');
     el.style.removeProperty('contain');
     el.style.removeProperty('content-visibility');
     delete el.dataset.cvCollapsed;
     detachedInfo.delete(el);
-    markExpanded(el);
+    const changed = markExpanded(el);
+    if (!virtualizationInProgress && changed) syncCollapsedCount();
     if (!hasMeasuredHeight(el)) ensureMeasured(el);
   }
 
@@ -1099,45 +1128,53 @@
 
     if (messageNodes.length === 0) {
       collapsedTotal = 0;
+      collapsedCountDirty = false;
       virtualizationDirty = false;
+      messageNodesDirty = false;
       lastVirtualizedRevision = messageRevision;
       updateHUD();
       updateStreamLock();
       return;
     }
 
-    const guardCount = Math.max(0, maxAlwaysVisibleTail + 2);
-    const guardStart = Math.max(0, messageNodes.length - guardCount);
+    virtualizationInProgress = true;
+    try {
+      const guardCount = Math.max(0, maxAlwaysVisibleTail + 2);
+      const guardStart = Math.max(0, messageNodes.length - guardCount);
 
-    messageNodes.forEach((el, idx) => {
-      if (!(el instanceof HTMLElement)) return;
-      if (idx >= guardStart) {
-        expandMessage(el);
-        visibleNodes.add(el);
-        return;
-      }
-      if (shouldSkipVirtualization(el)) {
-        expandMessage(el);
-        visibleNodes.add(el);
-        return;
-      }
-      const nearTail = isNearTail(idx, messageNodes.length);
-      if (nearTail || userExpanded.has(el) || visibleNodes.has(el)) {
-        expandMessage(el);
-        return;
-      }
-      if (!collapsedFlag.get(el)) {
-        if (!ensureMeasured(el)) {
+      messageNodes.forEach((el, idx) => {
+        if (!(el instanceof HTMLElement)) return;
+        if (idx >= guardStart) {
+          expandMessage(el);
           visibleNodes.add(el);
           return;
         }
-      }
-      collapseMessage(el);
-    });
+        if (shouldSkipVirtualization(el)) {
+          expandMessage(el);
+          visibleNodes.add(el);
+          return;
+        }
+        const nearTail = isNearTail(idx, messageNodes.length);
+        if (nearTail || userExpanded.has(el) || visibleNodes.has(el)) {
+          expandMessage(el);
+          return;
+        }
+        if (!collapsedFlag.get(el)) {
+          if (!ensureMeasured(el)) {
+            visibleNodes.add(el);
+            return;
+          }
+        }
+        collapseMessage(el);
+      });
 
-    expandVisibleCollapsed();
-    if (ultraMode) restoreUltraBackfill();
-    syncCollapsedCount();
+      expandVisibleCollapsed();
+      if (ultraMode) restoreUltraBackfill();
+      syncCollapsedCount({ force: true, silent: true });
+    } finally {
+      virtualizationInProgress = false;
+    }
+
     updateHUD();
 
     virtualizationDirty = false;
@@ -1191,14 +1228,21 @@
       streamLockTimer = null;
     }
     streamLock = false;
-    messageNodes.forEach(el => {
-      expandMessage(el);
-      userExpanded.delete(el);
-    });
-    document.querySelectorAll('.cv-placeholder').forEach(ph => {
-      const container = nodeForPlaceholder.get(ph);
-      if (container) expandMessage(container);
-    });
+    const prevState = virtualizationInProgress;
+    virtualizationInProgress = true;
+    try {
+      messageNodes.forEach(el => {
+        expandMessage(el);
+        userExpanded.delete(el);
+      });
+      document.querySelectorAll('.cv-placeholder').forEach(ph => {
+        const container = nodeForPlaceholder.get(ph);
+        if (container) expandMessage(container);
+      });
+    } finally {
+      virtualizationInProgress = prevState;
+    }
+    syncCollapsedCount({ force: true });
     updateHUD();
   }
 
@@ -1297,6 +1341,13 @@
       setUltraMode: (value) => setUltraMode(value, false),
       setRootScrollEl: (el) => { rootScrollEl = el; },
       getPlaceholderForNode: (el) => placeholderForNode.get(el),
+      getDetachedInfo: (el) => detachedInfo.get(el) || null,
+      getMessageNodes: () => messageNodes.slice(),
+      getCollapsedTotal: () => syncCollapsedCount({ silent: true }),
+      getHudStatusText: () => hudStatusEl?.textContent || '',
+      isStreamLockActive: () => streamLock,
+      updateStreamLock,
+      syncCollapsedCount: (opts) => syncCollapsedCount(opts),
       getScrollTop,
       setEnabled: (value) => { enabled = !!value; },
       virtualize,
