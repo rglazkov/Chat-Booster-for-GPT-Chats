@@ -1,0 +1,35 @@
+name: build-zip
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure src directory has been removed
+        run: |
+          if [ -d src ]; then
+            echo "::error::The src/ directory should not exist; extension files are stored at the repository root." >&2
+            exit 1
+          fi
+      - name: Make dist
+        run: |
+          mkdir -p dist
+          zip -r dist/chat-booster.zip \
+            manifest.json \
+            background.js \
+            content.js \
+            LICENSE \
+            README.md \
+            PRIVACY.md \
+            CHANGELOG.md \
+            -x "**/.DS_Store"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-booster-zip
+          path: dist/chat-booster.zip
