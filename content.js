@@ -47,6 +47,7 @@
   let hudTailLabelEl = null;
   let hudSettingsEl = null;
   let hudUltraBtn = null;
+  let hudReopenBtn = null;
   let hudTailInputEl = null;
   let hudCollapseBtn = null;
   let hudCollapsedIndicatorEl = null;
@@ -205,6 +206,26 @@
       setUltraMode(!ultraMode, true);
     });
     topRow.appendChild(hudUltraBtn);
+
+    hudReopenBtn = document.createElement('button');
+    hudReopenBtn.type = 'button';
+    hudReopenBtn.textContent = 'Reopen in tab';
+    hudReopenBtn.style.padding = '2px 8px';
+    hudReopenBtn.style.border = '1px solid currentColor';
+    hudReopenBtn.style.borderRadius = '6px';
+    hudReopenBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+    hudReopenBtn.style.font = '11px/1.2 system-ui, sans-serif';
+    hudReopenBtn.style.color = 'inherit';
+    hudReopenBtn.style.cursor = 'pointer';
+    hudReopenBtn.title = 'Open this chat in a new tab';
+    hudReopenBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        window.open(location.href, '_blank', 'noopener');
+      } catch {}
+    });
+    topRow.appendChild(hudReopenBtn);
 
     const controlsRow = document.createElement('div');
     controlsRow.style.display = 'flex';
@@ -445,6 +466,12 @@
   function isChatPage() {
     return /chatgpt\.com|chat\.openai\.com/.test(location.host);
   }
+  function getScrollTop() {
+    if (rootScrollEl instanceof Element) {
+      return rootScrollEl.scrollTop || 0;
+    }
+    return window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
+  }
   function findScrollRoot() {
     return document.querySelector('main') || document.scrollingElement || document.documentElement;
   }
@@ -541,6 +568,28 @@
     return ph;
   }
 
+  function restoreUltraBackfill() {
+    if (!ultraMode || messageNodes.length === 0) return;
+    const threshold = 120;
+    if (getScrollTop() > threshold) return;
+    let restored = 0;
+    const maxToRestore = Math.max(3, Math.min(10, maxAlwaysVisibleTail));
+    for (let i = 0; i < messageNodes.length; i++) {
+      const el = messageNodes[i];
+      if (!collapsedFlag.get(el)) continue;
+      const info = detachedInfo.get(el);
+      if (!info) continue;
+      const placeholder = info.placeholder || placeholderForNode.get(el);
+      if (!placeholder || placeholder.dataset?.cvDetached !== '1') continue;
+      const wasCollapsed = collapsedFlag.get(el);
+      expandMessage(el);
+      if (wasCollapsed) visibleNodes.add(el);
+      restored++;
+      if (restored >= maxToRestore) break;
+    }
+    if (restored > 0) updateHUD();
+  }
+
   function observeForNode(el) {
     if (!io) return;
     const placeholder = placeholderForNode.get(el);
@@ -548,7 +597,8 @@
     if (placeholder) {
       try { io.unobserve(placeholder); } catch {}
     }
-    const target = (collapsedFlag.get(el) && placeholder) ? placeholder : el;
+    const usePlaceholder = collapsedFlag.get(el) && placeholder && !(ultraMode && placeholder.dataset?.cvDetached === '1');
+    const target = usePlaceholder ? placeholder : el;
     if (target) {
       try { io.observe(target); } catch {}
     }
@@ -619,7 +669,13 @@
     if (placeholder.parentElement !== parent) {
       parent.insertBefore(placeholder, el.isConnected ? el : null);
     }
-    placeholder.style.display = 'flex';
+    placeholder.style.display = 'none';
+    placeholder.style.height = '0px';
+    placeholder.style.marginTop = '0';
+    placeholder.style.marginBottom = '0';
+    placeholder.style.marginLeft = '0';
+    placeholder.style.marginRight = '0';
+    placeholder.style.padding = '0';
     placeholder.dataset.cvDetached = '1';
     if (el.parentElement === parent) {
       parent.removeChild(el);
@@ -700,6 +756,7 @@
     placeholders.forEach(ph => {
       const container = nodeForPlaceholder.get(ph);
       if (!container || !collapsedFlag.get(container)) return;
+      if (ultraMode && ph.dataset?.cvDetached === '1') return;
       const rect = ph.getBoundingClientRect();
       if (!rect) return;
       if (rect.bottom < 0 || rect.top > viewportHeight) return;
@@ -717,6 +774,7 @@
     requestAnimationFrame(() => {
       scrollTicking = false;
       expandVisibleCollapsed();
+      if (ultraMode) restoreUltraBackfill();
     });
   }
 
@@ -762,6 +820,7 @@
       });
     }
     expandVisibleCollapsed();
+    if (ultraMode) restoreUltraBackfill();
     updateHUD();
   }
 
