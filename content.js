@@ -40,6 +40,8 @@
   const collapsedFlag = new WeakMap();
   const userExpanded = new WeakSet();
   let visibleNodes = new WeakSet();
+  let collapsedTotal = 0;
+  let lastHudOptimizedCount = null;
   const placeholderForNode = new WeakMap();
   const nodeForPlaceholder = new WeakMap();
   const detachedInfo = new WeakMap();
@@ -60,6 +62,43 @@
   let hudSettingsVisible = false;
   let hudCollapsed = false;
   let hudTailInputFocused = false;
+
+  function markCollapsed(el) {
+    if (!el) return;
+    const wasCollapsed = collapsedFlag.get(el) === true;
+    if (!wasCollapsed) {
+      collapsedTotal += 1;
+      collapsedFlag.set(el, true);
+    } else {
+      collapsedFlag.set(el, true);
+    }
+  }
+
+  function markExpanded(el) {
+    if (!el) return;
+    const wasCollapsed = collapsedFlag.get(el) === true;
+    if (wasCollapsed) {
+      collapsedTotal = Math.max(0, collapsedTotal - 1);
+    }
+    collapsedFlag.delete(el);
+  }
+
+  function forgetCollapsed(el) {
+    if (!el) return;
+    const wasCollapsed = collapsedFlag.get(el) === true;
+    if (wasCollapsed) {
+      collapsedTotal = Math.max(0, collapsedTotal - 1);
+    }
+    collapsedFlag.delete(el);
+  }
+
+  function syncCollapsedCount() {
+    let next = 0;
+    for (const el of messageNodes) {
+      if (collapsedFlag.get(el)) next += 1;
+    }
+    collapsedTotal = next;
+  }
 
   function clampTail(value) {
     const num = Math.floor(Number(value));
@@ -410,8 +449,11 @@
 
   function updateHUD() {
     if (!hudEl) return;
-    const n = document.querySelectorAll('.cv-placeholder').length;
-    if (hudStatusEl) hudStatusEl.textContent = `Chat Booster: ${n} optimized`;
+    const optimizedCount = Math.max(0, collapsedTotal);
+    if (hudStatusEl && (lastHudOptimizedCount === null || lastHudOptimizedCount !== optimizedCount || !hudStatusEl.textContent)) {
+      hudStatusEl.textContent = `Chat Booster: ${optimizedCount} optimized`;
+    }
+    lastHudOptimizedCount = optimizedCount;
     if (hudUltraBtn) {
       hudUltraBtn.textContent = `Ultra: ${ultraMode ? 'ON' : 'OFF'}`;
       hudUltraBtn.setAttribute('aria-pressed', ultraMode ? 'true' : 'false');
@@ -704,7 +746,10 @@
       const info = container ? detachedInfo.get(container) : null;
       if (!container || (!container.isConnected && !info)) {
         nodeForPlaceholder.delete(ph);
-        if (container) placeholderForNode.delete(container);
+        if (container) {
+          placeholderForNode.delete(container);
+          forgetCollapsed(container);
+        }
         ph.remove();
       }
     });
@@ -739,15 +784,16 @@
     }
     placeholder.style.display = 'flex';
     placeholder.dataset.cvDetached = '0';
-    placeholder.dataset.cvCollapsedHeight = `${height}px`;
-    placeholder.style.height = `${height}px`;
-    placeholder.style.minHeight = `${height}px`;
+    const collapsedHeight = PLACEHOLDER_HEIGHT;
+    placeholder.dataset.cvCollapsedHeight = `${collapsedHeight}px`;
+    placeholder.style.height = `${collapsedHeight}px`;
+    placeholder.style.minHeight = `${collapsedHeight}px`;
     stylePlaceholderAppearance(placeholder);
     el.innerHTML = '';
     el.style.display = 'none';
     el.dataset.cvCollapsed = '1';
     detachedInfo.delete(el);
-    collapsedFlag.set(el, true);
+    markCollapsed(el);
     userExpanded.delete(el);
     visibleNodes.delete(el);
     if (io) observeForNode(el);
@@ -797,7 +843,7 @@
     }
     el.dataset.cvCollapsed = '1';
     detachedInfo.set(el, { parent, placeholder });
-    collapsedFlag.set(el, true);
+    markCollapsed(el);
     userExpanded.delete(el);
     visibleNodes.delete(el);
     if (io) observeForNode(el);
@@ -828,7 +874,7 @@
     el.style.removeProperty('display');
     delete el.dataset.cvCollapsed;
     detachedInfo.delete(el);
-    collapsedFlag.set(el, false);
+    markExpanded(el);
     if (io) observeForNode(el);
   }
 
@@ -914,7 +960,11 @@
     lastScanAt = now;
 
     messageNodes = pickMessageNodes();
-    if (messageNodes.length === 0) return;
+    if (messageNodes.length === 0) {
+      collapsedTotal = 0;
+      updateHUD();
+      return;
+    }
 
     rebuildObserver();
 
@@ -940,6 +990,7 @@
     }
     expandVisibleCollapsed();
     if (ultraMode) restoreUltraBackfill();
+    syncCollapsedCount();
     updateHUD();
   }
 

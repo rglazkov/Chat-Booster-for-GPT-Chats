@@ -18,6 +18,10 @@ class FakeElement {
     this._rect = null;
   }
 
+  addEventListener() {}
+
+  removeEventListener() {}
+
   _propagateConnection(isConnected) {
     this.isConnected = isConnected;
     this.children.forEach(child => child._propagateConnection(isConnected));
@@ -86,6 +90,7 @@ class FakeElement {
     }
     if (selector === 'main') return this.tagName === 'MAIN';
     if (selector === 'div') return this.tagName === 'DIV';
+    if (selector === 'span') return this.tagName === 'SPAN';
     if (selector === '.cv-placeholder') return this.className === 'cv-placeholder';
     if (selector === '[data-testid="conversation-turn"]') return this.dataset.testid === 'conversation-turn';
     if (selector === '[data-message-id]') return this.dataset.messageId !== undefined;
@@ -253,6 +258,8 @@ function setup() {
     unobserve() {}
     disconnect() {}
   };
+  global.setInterval = () => ({ cancel() {} });
+  global.clearInterval = () => {};
 
   delete require.cache[require.resolve('../content.js')];
   require('../content.js');
@@ -275,6 +282,8 @@ function teardown() {
   delete global.requestAnimationFrame;
   delete global.MutationObserver;
   delete global.IntersectionObserver;
+  delete global.setInterval;
+  delete global.clearInterval;
   try {
     delete require.cache[require.resolve('../content.js')];
   } catch {}
@@ -344,6 +353,98 @@ test('collapsing a node above the viewport keeps scroll anchored and zero-height
     assert.strictEqual(placeholder.dataset.cvDetached, '1');
     assert.strictEqual(placeholder.style.height, '0px');
     assert.strictEqual(scroller.scrollTop, 200);
+  } finally {
+    teardown();
+  }
+});
+
+test('strict mode placeholders stay compact', () => {
+  const { hooks, document } = setup();
+  try {
+    const container = new FakeElement('div');
+    document.body.appendChild(container);
+    container._propagateConnection(true);
+
+    const msg = new FakeElement('div');
+    msg.textContent = 'final message';
+    msg.setAttribute('data-message-status', 'finished');
+    msg.setBoundingClientRect({ top: 0, bottom: 400, height: 400 });
+    container.appendChild(msg);
+
+    hooks.setUltraMode(false);
+    hooks.collapseMessage(msg);
+
+    const placeholder = hooks.getPlaceholderForNode(msg);
+    assert.ok(placeholder);
+    assert.strictEqual(placeholder.style.height, '12px');
+    assert.strictEqual(placeholder.style.minHeight, '12px');
+  } finally {
+    teardown();
+  }
+});
+
+test('HUD optimized count remains stable and reflects removals', () => {
+  const { hooks, document, window } = setup();
+  try {
+    const main = new FakeElement('main');
+    document.body.appendChild(main);
+    const messages = [];
+    for (let i = 0; i < 20; i++) {
+      const msg = new FakeElement('div');
+      msg.dataset.testid = 'conversation-turn';
+      msg.textContent = `message ${i}`;
+      const top = i < 10 ? -1500 - i * 120 : 1200 + (i - 10) * 120;
+      msg.setBoundingClientRect({ top, bottom: top + 100, height: 100 });
+      main.appendChild(msg);
+      messages.push(msg);
+    }
+    main._propagateConnection(true);
+    main.scrollTop = 2000;
+    window.scrollY = 2000;
+    window.innerHeight = -1;
+
+    const originalNow = Date.now;
+    let nowValue = 0;
+    Date.now = () => nowValue;
+    try {
+      hooks.setUltraMode(true);
+      const boot = global.__CHAT_BOOSTER_MANUAL_BOOT__;
+      nowValue = 2000;
+      boot();
+
+      const statusSpan = document.querySelector('span');
+      assert.ok(statusSpan);
+      const placeholderCount = document.querySelectorAll('.cv-placeholder').length;
+      assert.strictEqual(placeholderCount, 10);
+      assert.strictEqual(statusSpan.textContent, 'Chat Booster: 10 optimized');
+
+      nowValue = 3200;
+      hooks.virtualize();
+      assert.strictEqual(statusSpan.textContent, 'Chat Booster: 10 optimized');
+
+      const replacement = new FakeElement('main');
+      main.remove();
+      document.body.appendChild(replacement);
+      replacement._propagateConnection(true);
+      for (let i = 0; i < 19; i++) {
+        const msg = new FakeElement('div');
+        msg.dataset.testid = 'conversation-turn';
+        msg.textContent = `message replacement ${i}`;
+        const top = i < 9 ? -1500 - i * 120 : 1200 + (i - 9) * 120;
+        msg.setBoundingClientRect({ top, bottom: top + 100, height: 100 });
+        replacement.appendChild(msg);
+      }
+      replacement.scrollTop = 2000;
+      window.scrollY = 2000;
+
+      nowValue = 4800;
+      hooks.virtualize();
+      const placeholderCountAfter = document.querySelectorAll('.cv-placeholder').length;
+      assert.strictEqual(placeholderCountAfter, 9);
+      assert.strictEqual(statusSpan.textContent, 'Chat Booster: 9 optimized');
+    } finally {
+      Date.now = originalNow;
+    }
   } finally {
     teardown();
   }
