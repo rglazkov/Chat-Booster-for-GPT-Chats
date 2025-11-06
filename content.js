@@ -1,4 +1,7 @@
 (function () {
+  const globalObj = typeof globalThis !== 'undefined' ? globalThis : window;
+  const ENABLE_TEST_HOOKS = !!globalObj.__CHAT_BOOSTER_ENABLE_TEST_HOOKS__;
+  const AUTO_BOOT_DISABLED = !!globalObj.__CHAT_BOOSTER_DISABLE_AUTOBOOT__;
   const MAX_ALWAYS_VISIBLE_TAIL = 10;  // keep only last 10 expanded by default
   const PLACEHOLDER_HEIGHT = 12;
   const SCAN_INTERVAL_MS = 1200;
@@ -62,6 +65,61 @@
     const num = Math.floor(Number(value));
     if (!Number.isFinite(num)) return maxAlwaysVisibleTail;
     return Math.max(1, Math.min(50, num));
+  }
+
+  function getRootViewportRect() {
+    if (rootScrollEl instanceof Element) {
+      return rootScrollEl.getBoundingClientRect();
+    }
+    return { top: 0, bottom: window.innerHeight || document.documentElement.clientHeight || 0 };
+  }
+
+  function shiftScrollBy(delta) {
+    if (!delta) return;
+    if (rootScrollEl instanceof Element) {
+      rootScrollEl.scrollTop = (rootScrollEl.scrollTop || 0) - delta;
+    } else {
+      window.scrollBy(0, -delta);
+    }
+  }
+
+  function isMessageStreaming(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (collapsedFlag.get(el)) return false;
+    const explicitLock = el.dataset?.cvLock === '1';
+    if (explicitLock) return true;
+    const status = el.getAttribute?.('data-message-status') || el.dataset?.messageStatus || '';
+    if (status) {
+      const normalized = status.toLowerCase();
+      if (!/(finished|success|done|complete|resolved)/.test(normalized)) {
+        return true;
+      }
+    }
+    const streamingAttr = el.getAttribute?.('data-streaming') || el.dataset?.streaming;
+    if (typeof streamingAttr === 'string' && /^(1|true|yes)$/i.test(streamingAttr)) {
+      return true;
+    }
+    const ariaBusy = el.getAttribute?.('aria-busy');
+    if (ariaBusy === 'true') return true;
+    if (el.querySelector?.('[data-testid*="thinking" i]')) return true;
+    if (el.querySelector?.('[data-testid*="spinner" i]')) return true;
+    const pendingRole = el.querySelector?.('[data-message-author-role="assistant"][data-state], [data-message-author-role="assistant"][data-is-streaming]');
+    if (pendingRole) {
+      const dataState = pendingRole.getAttribute('data-state') || pendingRole.getAttribute('data-is-streaming');
+      if (typeof dataState === 'string' && /pending|loading|true|1/i.test(dataState)) return true;
+    }
+    const text = el.textContent || '';
+    if (!status && /thinking\u2026|thinking\.\.\.|processing/i.test(text)) {
+      return true;
+    }
+    return false;
+  }
+
+  function shouldSkipVirtualization(el) {
+    if (!(el instanceof HTMLElement)) return true;
+    if (userExpanded.has(el)) return false;
+    if (isMessageStreaming(el)) return true;
+    return false;
   }
 
   function loadTailSetting() {
@@ -464,6 +522,10 @@
       const el = nodeForPlaceholder.get(entry.target) || entry.target;
       const idx = messageNodes.indexOf(el);
       const nearTail = idx >= 0 && isNearTail(idx, messageNodes.length);
+      if (shouldSkipVirtualization(el)) {
+        visibleNodes.add(el);
+        continue;
+      }
       if (entry.isIntersecting || entry.intersectionRatio > 0) {
         visibleNodes.add(el);
         if (collapsedFlag.get(el) && !userExpanded.has(el)) expandMessage(el);
@@ -548,8 +610,9 @@
       ph.style.background = 'transparent';
       ph.style.color = 'transparent';
       ph.textContent = '';
-      ph.style.minHeight = '1px';
-      ph.style.height = ph.style.height && ph.style.height !== '0px' ? ph.style.height : '1px';
+      const collapsedHeight = ph.dataset?.cvCollapsedHeight || '0px';
+      ph.style.minHeight = collapsedHeight;
+      ph.style.height = collapsedHeight;
       return;
     }
     ph.style.opacity = hudCollapsed ? '0' : '0.55';
@@ -558,6 +621,11 @@
     ph.style.background = hudCollapsed ? 'transparent' : 'rgba(0, 0, 0, 0.04)';
     ph.style.color = hudCollapsed ? 'transparent' : 'inherit';
     ph.textContent = hudCollapsed ? '' : (ph.dataset.cvLabel || '…');
+    const collapsedHeight = ph.dataset?.cvCollapsedHeight;
+    if (collapsedHeight) {
+      ph.style.height = collapsedHeight;
+      ph.style.minHeight = collapsedHeight;
+    }
   }
 
   function ensurePlaceholder(el, height) {
@@ -580,6 +648,7 @@
     }
     const appliedHeight = Math.max(height, PLACEHOLDER_HEIGHT);
     ph.style.height = `${appliedHeight}px`;
+    ph.dataset.cvCollapsedHeight = `${appliedHeight}px`;
     const style = el instanceof Element ? window.getComputedStyle(el) : null;
     if (style) {
       ph.style.marginTop = style.marginTop;
@@ -600,6 +669,7 @@
     const maxToRestore = Math.max(3, Math.min(10, maxAlwaysVisibleTail));
     for (let i = 0; i < messageNodes.length; i++) {
       const el = messageNodes[i];
+      if (shouldSkipVirtualization(el)) continue;
       if (!collapsedFlag.get(el)) continue;
       const info = detachedInfo.get(el);
       if (!info) continue;
@@ -641,6 +711,12 @@
   }
 
   function collapseMessage(el) {
+    if (!(el instanceof HTMLElement)) return;
+    if (shouldSkipVirtualization(el)) {
+      expandMessage(el);
+      visibleNodes.add(el);
+      return;
+    }
     if (ultraMode) collapseMessageUltra(el);
     else collapseMessageStrict(el);
   }
@@ -663,6 +739,10 @@
     }
     placeholder.style.display = 'flex';
     placeholder.dataset.cvDetached = '0';
+    placeholder.dataset.cvCollapsedHeight = `${height}px`;
+    placeholder.style.height = `${height}px`;
+    placeholder.style.minHeight = `${height}px`;
+    stylePlaceholderAppearance(placeholder);
     el.innerHTML = '';
     el.style.display = 'none';
     el.dataset.cvCollapsed = '1';
@@ -679,8 +759,9 @@
     const parent = el.parentElement || info?.parent || placeholderForNode.get(el)?.parentElement;
     if (!parent) return;
     let height = PLACEHOLDER_HEIGHT;
+    let rect = { height: PLACEHOLDER_HEIGHT, top: 0, bottom: 0 };
     if (el.isConnected) {
-      const rect = el.getBoundingClientRect();
+      rect = el.getBoundingClientRect();
       height = Math.max(rect.height || 0, PLACEHOLDER_HEIGHT);
     } else {
       const existingPlaceholder = placeholderForNode.get(el);
@@ -694,8 +775,9 @@
       parent.insertBefore(placeholder, el.isConnected ? el : null);
     }
     placeholder.style.display = 'block';
-    placeholder.style.height = '1px';
-    placeholder.style.minHeight = '1px';
+    placeholder.dataset.cvCollapsedHeight = '0px';
+    placeholder.style.height = '0px';
+    placeholder.style.minHeight = '0px';
     placeholder.style.marginTop = '0';
     placeholder.style.marginBottom = '0';
     placeholder.style.marginLeft = '0';
@@ -704,8 +786,14 @@
     placeholder.style.opacity = '0';
     placeholder.style.pointerEvents = 'none';
     placeholder.dataset.cvDetached = '1';
+    stylePlaceholderAppearance(placeholder);
+    const viewport = getRootViewportRect();
+    const isAboveViewport = el.isConnected && rect.bottom <= viewport.top;
     if (el.parentElement === parent) {
       parent.removeChild(el);
+    }
+    if (isAboveViewport && height > 0) {
+      shiftScrollBy(height);
     }
     el.dataset.cvCollapsed = '1';
     detachedInfo.set(el, { parent, placeholder });
@@ -832,6 +920,11 @@
 
     // Only last N expanded; everything else collapsed unless visible or user expanded
     messageNodes.forEach((el, idx) => {
+      if (shouldSkipVirtualization(el)) {
+        expandMessage(el);
+        visibleNodes.add(el);
+        return;
+      }
       const nearTail = isNearTail(idx, messageNodes.length);
       if (nearTail || userExpanded.has(el) || visibleNodes.has(el)) {
         expandMessage(el);
@@ -895,20 +988,51 @@
     setInterval(() => { if (enabled) virtualize(); }, SCAN_INTERVAL_MS);
   }
 
-  if (document.readyState === "complete" || document.readyState === "interactive") boot();
-  else window.addEventListener('DOMContentLoaded', boot);
+  if (!AUTO_BOOT_DISABLED) {
+    if (document.readyState === "complete" || document.readyState === "interactive") boot();
+    else window.addEventListener('DOMContentLoaded', boot);
+  } else {
+    globalObj.__CHAT_BOOSTER_MANUAL_BOOT__ = boot;
+  }
 
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (!msg?.type) return;
-    if (msg.type === 'CV_TOGGLE') {
-      enabled = !!msg.enabled;
-      if (enabled) virtualize(); else expandAllAndDisable();
-      updateHUD();
-    }
-    if (msg.type === 'CV_APPLY') {
-      enabled = !!msg.enabled;
-      if (enabled) virtualize(); else expandAllAndDisable();
-      updateHUD();
-    }
-  });
+  if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage?.addListener) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (!msg?.type) return;
+      if (msg.type === 'CV_TOGGLE') {
+        enabled = !!msg.enabled;
+        if (enabled) virtualize(); else expandAllAndDisable();
+        updateHUD();
+      }
+      if (msg.type === 'CV_APPLY') {
+        enabled = !!msg.enabled;
+        if (enabled) virtualize(); else expandAllAndDisable();
+        updateHUD();
+      }
+    });
+  }
+
+  if (ENABLE_TEST_HOOKS) {
+    const testHooks = {
+      collapseMessage,
+      collapseMessageStrict,
+      collapseMessageUltra,
+      expandMessage,
+      isMessageStreaming,
+      shouldSkipVirtualization,
+      setUltraMode: (value) => setUltraMode(value, false),
+      setRootScrollEl: (el) => { rootScrollEl = el; },
+      getPlaceholderForNode: (el) => placeholderForNode.get(el),
+      getScrollTop,
+      setEnabled: (value) => { enabled = !!value; },
+      virtualize,
+      boot,
+      get visibleNodes() { return visibleNodes; },
+      set visibleNodes(next) { if (next instanceof WeakSet) visibleNodes = next; }
+    };
+    Object.defineProperty(globalObj, '__CHAT_BOOSTER_TEST_HOOKS__', {
+      value: testHooks,
+      configurable: true,
+      writable: false
+    });
+  }
 })();
