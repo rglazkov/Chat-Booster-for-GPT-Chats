@@ -1,5 +1,5 @@
 (function () {
-  const MAX_ALWAYS_VISIBLE_TAIL = 6;   // keep only last 6 expanded by default
+  const MAX_ALWAYS_VISIBLE_TAIL = 10;  // keep only last 10 expanded by default
   const PLACEHOLDER_HEIGHT = 12;
   const SCAN_INTERVAL_MS = 1200;
 
@@ -8,6 +8,9 @@
     hudPos: 'cv-hud-pos',
     hudCollapsed: 'cv-hud-collapsed'
   };
+
+  const ULTRA_STORAGE_KEY = 'cb.ultra';
+  const DEFAULT_ULTRA_MODE = true;
 
   const SELECTORS = [
     '[data-testid="conversation-turn"]',
@@ -19,6 +22,7 @@
   ];
 
   let enabled = true;
+  let ultraMode = DEFAULT_ULTRA_MODE;
   let initialized = false;
   let messageNodes = [];
   let io = null;
@@ -35,12 +39,14 @@
   let visibleNodes = new WeakSet();
   const placeholderForNode = new WeakMap();
   const nodeForPlaceholder = new WeakMap();
+  const detachedInfo = new WeakMap();
 
   // HUD (fixed, bottom-right)
   let hudEl = null;
   let hudStatusEl = null;
   let hudTailLabelEl = null;
   let hudSettingsEl = null;
+  let hudUltraBtn = null;
   let hudTailInputEl = null;
   let hudCollapseBtn = null;
   let hudCollapsedIndicatorEl = null;
@@ -103,12 +109,55 @@
     } catch {}
   }
 
+  function loadUltraPreference() {
+    try {
+      if (!chrome?.storage?.local?.get) {
+        setUltraMode(DEFAULT_ULTRA_MODE, false);
+        return;
+      }
+      chrome.storage.local.get({ [ULTRA_STORAGE_KEY]: DEFAULT_ULTRA_MODE }, (result) => {
+        if (chrome.runtime?.lastError) {
+          setUltraMode(DEFAULT_ULTRA_MODE, false);
+          return;
+        }
+        const stored = result?.[ULTRA_STORAGE_KEY];
+        setUltraMode(typeof stored === 'boolean' ? stored : DEFAULT_ULTRA_MODE, false);
+      });
+    } catch {
+      setUltraMode(DEFAULT_ULTRA_MODE, false);
+    }
+  }
+
+  function setUltraMode(value, persist) {
+    const next = !!value;
+    const shouldPersist = !!persist;
+    const changed = ultraMode !== next;
+    ultraMode = next;
+    if (shouldPersist && chrome?.storage?.local?.set) {
+      try { chrome.storage.local.set({ [ULTRA_STORAGE_KEY]: next }); }
+      catch {}
+    }
+    if (!initialized) {
+      updateHUD();
+      return;
+    }
+    if (changed) {
+      messageNodes.forEach(el => { expandMessage(el); });
+      document.querySelectorAll('.cv-placeholder').forEach(ph => {
+        const container = nodeForPlaceholder.get(ph);
+        if (container) expandMessage(container);
+      });
+      lastScanAt = 0;
+      virtualize();
+    }
+    updateHUD();
+  }
+
   loadTailSetting();
-  loadHudPosition();
   loadHudCollapsed();
+  loadUltraPreference();
   function ensureHUD() {
     if (hudEl) return;
-    if (!hudPosition) loadHudPosition();
     hudEl = document.createElement('div');
     hudEl.id = 'cv-hud';
     hudEl.style.position = 'fixed';
@@ -123,8 +172,8 @@
     hudEl.style.backdropFilter = 'blur(2px)';
     hudEl.style.color = 'inherit';
     hudEl.style.zIndex = '2147483647';
-    hudEl.style.cursor = 'grab';
-    hudEl.style.touchAction = 'none';
+    hudEl.style.cursor = 'default';
+    hudEl.style.touchAction = 'auto';
     hudEl.style.userSelect = 'none';
 
     hudContentWrapperEl = document.createElement('div');
@@ -135,10 +184,27 @@
     const topRow = document.createElement('div');
     topRow.style.display = 'flex';
     topRow.style.alignItems = 'center';
+    topRow.style.gap = '8px';
 
     hudStatusEl = document.createElement('span');
     hudStatusEl.style.whiteSpace = 'nowrap';
     topRow.appendChild(hudStatusEl);
+
+    hudUltraBtn = document.createElement('button');
+    hudUltraBtn.type = 'button';
+    hudUltraBtn.style.padding = '2px 8px';
+    hudUltraBtn.style.border = '1px solid currentColor';
+    hudUltraBtn.style.borderRadius = '6px';
+    hudUltraBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+    hudUltraBtn.style.font = '11px/1.2 system-ui, sans-serif';
+    hudUltraBtn.style.color = 'inherit';
+    hudUltraBtn.style.cursor = 'pointer';
+    hudUltraBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setUltraMode(!ultraMode, true);
+    });
+    topRow.appendChild(hudUltraBtn);
 
     const controlsRow = document.createElement('div');
     controlsRow.style.display = 'flex';
@@ -247,18 +313,6 @@
 
     document.documentElement.appendChild(hudEl);
 
-    if (hudPosition) {
-      hudEl.style.left = `${hudPosition.left}px`;
-      hudEl.style.top = `${hudPosition.top}px`;
-      hudEl.style.right = '';
-      hudEl.style.bottom = '';
-    }
-
-    hudEl.addEventListener('pointerdown', handleHudPointerDown);
-    hudEl.addEventListener('pointermove', handleHudPointerMove);
-    hudEl.addEventListener('pointerup', handleHudPointerUpOrCancel);
-    hudEl.addEventListener('pointercancel', handleHudPointerUpOrCancel);
-
     applyHudCollapsedState();
     updateHUD();
   }
@@ -267,6 +321,10 @@
     if (!hudEl) return;
     const n = document.querySelectorAll('.cv-placeholder').length;
     if (hudStatusEl) hudStatusEl.textContent = `Chat Booster: ${n} optimized`;
+    if (hudUltraBtn) {
+      hudUltraBtn.textContent = `Ultra: ${ultraMode ? 'ON' : 'OFF'}`;
+      hudUltraBtn.setAttribute('aria-pressed', ultraMode ? 'true' : 'false');
+    }
     if (hudTailLabelEl) {
       const indicator = hudSettingsVisible ? '▴' : '▾';
       hudTailLabelEl.textContent = `Tail: ${maxAlwaysVisibleTail} ${indicator}`;
@@ -302,7 +360,7 @@
       hudCollapsedIndicatorEl.setAttribute('aria-hidden', hudCollapsed ? 'false' : 'true');
     }
     hudEl.style.padding = hudCollapsed ? '6px 8px' : '6px 10px';
-    hudEl.style.cursor = hudCollapsed ? 'pointer' : 'grab';
+    hudEl.style.cursor = hudCollapsed ? 'pointer' : 'default';
     hudEl.style.minWidth = hudCollapsed ? '32px' : '';
     hudEl.style.minHeight = hudCollapsed ? '32px' : '';
     hudEl.setAttribute('aria-hidden', 'false');
@@ -417,19 +475,24 @@
     const result = [];
     const root = document.querySelector('main') || document.body || document.documentElement;
     if (!root) return result;
-    for (const sel of SELECTORS) {
-      root.querySelectorAll(sel).forEach(node => {
-        const container = normalizeMessageNode(node);
-        if (!container || seen.has(container)) return;
-        if (container.classList?.contains('cv-placeholder')) return;
-        const style = container instanceof Element ? window.getComputedStyle(container) : null;
-        const isCollapsed = container?.dataset?.cvCollapsed === '1';
+    const selectors = [...SELECTORS, '.cv-placeholder'];
+    root.querySelectorAll(selectors.join(',')).forEach(node => {
+      let container = null;
+      if (node.classList?.contains('cv-placeholder')) {
+        container = nodeForPlaceholder.get(node) || null;
+      } else {
+        container = normalizeMessageNode(node);
+      }
+      if (!container || seen.has(container)) return;
+      if (container.classList?.contains?.('cv-placeholder')) return;
+      const isCollapsed = container?.dataset?.cvCollapsed === '1';
+      if (container instanceof Element && container.isConnected) {
+        const style = window.getComputedStyle(container);
         if (style && (style.display === 'none' || style.visibility === 'hidden') && !isCollapsed) return;
-        seen.add(container);
-        result.push(container);
-      });
-    }
-    if (result.length > 1) result.sort(byDomOrder);
+      }
+      seen.add(container);
+      result.push(container);
+    });
     return result;
   }
   function isNearTail(index, total) {
@@ -494,7 +557,8 @@
   function cleanupOrphanPlaceholders() {
     document.querySelectorAll('.cv-placeholder').forEach(ph => {
       const container = nodeForPlaceholder.get(ph);
-      if (!container || !container.isConnected) {
+      const info = container ? detachedInfo.get(container) : null;
+      if (!container || (!container.isConnected && !info)) {
         nodeForPlaceholder.delete(ph);
         if (container) placeholderForNode.delete(container);
         ph.remove();
@@ -503,7 +567,12 @@
   }
 
   function collapseMessage(el) {
-    if (collapsedFlag.get(el)) return;
+    if (ultraMode) collapseMessageUltra(el);
+    else collapseMessageStrict(el);
+  }
+
+  function collapseMessageStrict(el) {
+    if (collapsedFlag.get(el) && !detachedInfo.has(el)) return;
     if (!(el instanceof HTMLElement) || !el.parentElement) return;
     originalHTML.set(el, el.innerHTML);
     const rect = el.getBoundingClientRect();
@@ -519,9 +588,44 @@
       parent.insertBefore(placeholder, el);
     }
     placeholder.style.display = 'flex';
+    placeholder.dataset.cvDetached = '0';
     el.innerHTML = '';
     el.style.display = 'none';
     el.dataset.cvCollapsed = '1';
+    detachedInfo.delete(el);
+    collapsedFlag.set(el, true);
+    userExpanded.delete(el);
+    visibleNodes.delete(el);
+    if (io) observeForNode(el);
+  }
+
+  function collapseMessageUltra(el) {
+    if (!(el instanceof HTMLElement)) return;
+    const info = detachedInfo.get(el);
+    const parent = el.parentElement || info?.parent || placeholderForNode.get(el)?.parentElement;
+    if (!parent) return;
+    let height = PLACEHOLDER_HEIGHT;
+    if (el.isConnected) {
+      const rect = el.getBoundingClientRect();
+      height = Math.max(rect.height || 0, PLACEHOLDER_HEIGHT);
+    } else {
+      const existingPlaceholder = placeholderForNode.get(el);
+      if (existingPlaceholder?.dataset?.cvHeight) {
+        const stored = parseFloat(existingPlaceholder.dataset.cvHeight);
+        if (Number.isFinite(stored)) height = Math.max(height, stored);
+      }
+    }
+    const placeholder = ensurePlaceholder(el, height);
+    if (placeholder.parentElement !== parent) {
+      parent.insertBefore(placeholder, el.isConnected ? el : null);
+    }
+    placeholder.style.display = 'flex';
+    placeholder.dataset.cvDetached = '1';
+    if (el.parentElement === parent) {
+      parent.removeChild(el);
+    }
+    el.dataset.cvCollapsed = '1';
+    detachedInfo.set(el, { parent, placeholder });
     collapsedFlag.set(el, true);
     userExpanded.delete(el);
     visibleNodes.delete(el);
@@ -530,15 +634,29 @@
 
   function expandMessage(el) {
     if (!collapsedFlag.get(el)) return;
-    const html = originalHTML.get(el);
-    if (typeof html === 'string') el.innerHTML = html;
     const placeholder = placeholderForNode.get(el);
+    const info = detachedInfo.get(el);
+    if (info && placeholder) {
+      const parent = placeholder.parentElement || info.parent;
+      if (parent) {
+        parent.insertBefore(el, placeholder);
+      }
+    } else if (info?.parent) {
+      info.parent.insertBefore(el, info.placeholder?.nextSibling || null);
+    } else {
+      const html = originalHTML.get(el);
+      if (typeof html === 'string') el.innerHTML = html;
+    }
     if (placeholder?.parentElement) {
       placeholder.parentElement.removeChild(placeholder);
     }
-    if (placeholder) placeholder.style.display = 'none';
+    if (placeholder) {
+      placeholder.style.display = 'none';
+      placeholder.dataset.cvDetached = '0';
+    }
     el.style.removeProperty('display');
     delete el.dataset.cvCollapsed;
+    detachedInfo.delete(el);
     collapsedFlag.set(el, false);
     if (io) observeForNode(el);
   }
@@ -654,6 +772,10 @@
       expandMessage(el);
       userExpanded.delete(el);
     });
+    document.querySelectorAll('.cv-placeholder').forEach(ph => {
+      const container = nodeForPlaceholder.get(ph);
+      if (container) expandMessage(container);
+    });
     updateHUD();
   }
 
@@ -664,7 +786,7 @@
     if (!container) return;
     const wasCollapsed = collapsedFlag.get(container);
     expandMessage(container);
-    if (wasCollapsed) userExpanded.add(container);
+    if (wasCollapsed && !ultraMode) userExpanded.add(container);
     container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     updateHUD();
   }, { passive: true });
