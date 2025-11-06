@@ -4,7 +4,13 @@
   const AUTO_BOOT_DISABLED = !!globalObj.__CHAT_BOOSTER_DISABLE_AUTOBOOT__;
   const MAX_ALWAYS_VISIBLE_TAIL = 10;  // keep only last 10 expanded by default
   const PLACEHOLDER_HEIGHT = 12;
-  const SCAN_INTERVAL_MS = 1200;
+  const SCAN_INTERVAL_MS = 2000;
+  const MUTATION_DEBOUNCE_MS = 650;
+  const STREAM_LOCK_RELEASE_DELAY_MS = 420;
+
+  const scheduleIdle = typeof globalObj.requestIdleCallback === 'function'
+    ? (cb) => globalObj.requestIdleCallback(cb, { timeout: 500 })
+    : (cb) => setTimeout(cb, 120);
 
   const STORAGE_KEYS = {
     tail: 'cv-max-tail',
@@ -28,7 +34,15 @@
   let ultraMode = DEFAULT_ULTRA_MODE;
   let initialized = false;
   let messageNodes = [];
-  let io = null;
+  let messageSet = new WeakSet();
+  let messageNodesDirty = true;
+  let messageRevision = 0;
+  let lastVirtualizedRevision = -1;
+  let virtualizationDirty = true;
+  let streamLock = false;
+  let streamLockTimer = null;
+  const measurementQueue = new Set();
+  let measurementHandle = null;
   let rootScrollEl = null;
   let scrollTarget = null;
   let scrollTicking = false;
@@ -247,6 +261,7 @@
         if (container) expandMessage(container);
       });
       lastScanAt = 0;
+      virtualizationDirty = true;
       virtualize();
     }
     updateHUD();
@@ -479,6 +494,7 @@
     applyHudCollapsedState();
     updateHUD();
     lastScanAt = 0;
+    virtualizationDirty = true;
     virtualize();
   }
 
@@ -511,6 +527,7 @@
     maxAlwaysVisibleTail = clamped;
     saveTailSetting(clamped);
     lastScanAt = 0;
+    virtualizationDirty = true;
     virtualize();
     updateHUD();
   }
@@ -556,27 +573,6 @@
     hudEl.style.cursor = 'grab';
     dragState = null;
     if (hudPosition) saveHudPosition(hudPosition);
-  }
-
-  function handleIntersection(entries) {
-    if (!enabled) return;
-    for (const entry of entries) {
-      const el = nodeForPlaceholder.get(entry.target) || entry.target;
-      const idx = messageNodes.indexOf(el);
-      const nearTail = idx >= 0 && isNearTail(idx, messageNodes.length);
-      if (shouldSkipVirtualization(el)) {
-        visibleNodes.add(el);
-        continue;
-      }
-      if (entry.isIntersecting || entry.intersectionRatio > 0) {
-        visibleNodes.add(el);
-        if (collapsedFlag.get(el) && !userExpanded.has(el)) expandMessage(el);
-      } else {
-        visibleNodes.delete(el);
-        if (!nearTail && !userExpanded.has(el)) collapseMessage(el);
-      }
-    }
-    updateHUD();
   }
 
   function isChatPage() {
@@ -638,6 +634,60 @@
     });
     return result;
   }
+
+  function rebuildMessageNodes() {
+    const next = pickMessageNodes();
+    messageNodes = next;
+    messageSet = new WeakSet();
+    next.forEach(node => {
+      if (node instanceof HTMLElement) messageSet.add(node);
+    });
+    messageNodesDirty = false;
+    messageRevision += 1;
+  }
+
+  function addMessageNode(node) {
+    const container = normalizeMessageNode(node);
+    if (!(container instanceof HTMLElement)) {
+      messageNodesDirty = true;
+      return false;
+    }
+    if (messageSet.has(container)) return false;
+    messageNodes.push(container);
+    messageSet.add(container);
+    messageNodes.sort(byDomOrder);
+    messageRevision += 1;
+    virtualizationDirty = true;
+    return true;
+  }
+
+  function removeMessageNode(node) {
+    const container = normalizeMessageNode(node);
+    if (!(container instanceof HTMLElement)) {
+      messageNodesDirty = true;
+      return false;
+    }
+    if (!messageSet.has(container)) return false;
+    messageSet.delete(container);
+    const idx = messageNodes.indexOf(container);
+    if (idx >= 0) messageNodes.splice(idx, 1);
+    measurementQueue.delete(container);
+    const placeholder = placeholderForNode.get(container);
+    if (placeholder) {
+      placeholderForNode.delete(container);
+      nodeForPlaceholder.delete(placeholder);
+      if (placeholder.parentElement) {
+        placeholder.remove();
+      }
+    }
+    detachedInfo.delete(container);
+    forgetCollapsed(container);
+    userExpanded.delete(container);
+    visibleNodes.delete(container);
+    virtualizationDirty = true;
+    messageRevision += 1;
+    return true;
+  }
   function isNearTail(index, total) {
     return index >= total - maxAlwaysVisibleTail;
   }
@@ -651,12 +701,14 @@
       ph.style.border = '0';
       ph.style.background = 'transparent';
       ph.style.color = 'transparent';
+      ph.style.contentVisibility = 'hidden';
       ph.textContent = '';
       const collapsedHeight = ph.dataset?.cvCollapsedHeight || '0px';
       ph.style.minHeight = collapsedHeight;
       ph.style.height = collapsedHeight;
       return;
     }
+    ph.style.contentVisibility = 'auto';
     ph.style.opacity = hudCollapsed ? '0' : '0.55';
     ph.style.pointerEvents = hudCollapsed ? 'none' : 'auto';
     ph.style.border = hudCollapsed ? '0' : '1px dashed currentColor';
@@ -689,6 +741,9 @@
       nodeForPlaceholder.set(ph, el);
     }
     const appliedHeight = Math.max(height, PLACEHOLDER_HEIGHT);
+    ph.dataset.cvHeight = String(appliedHeight);
+    ph.style.contain = 'layout paint size';
+    ph.style.contentVisibility = 'auto';
     ph.style.height = `${appliedHeight}px`;
     ph.dataset.cvCollapsedHeight = `${appliedHeight}px`;
     const style = el instanceof Element ? window.getComputedStyle(el) : null;
@@ -698,9 +753,104 @@
       ph.style.marginLeft = style.marginLeft;
       ph.style.marginRight = style.marginRight;
     }
-    ph.dataset.cvHeight = String(appliedHeight);
     stylePlaceholderAppearance(ph);
     return ph;
+  }
+
+  function getStoredHeight(el) {
+    if (!(el instanceof HTMLElement)) return PLACEHOLDER_HEIGHT;
+    const info = detachedInfo.get(el);
+    if (info && typeof info.height === 'number' && Number.isFinite(info.height)) {
+      return Math.max(PLACEHOLDER_HEIGHT, info.height);
+    }
+    const placeholder = placeholderForNode.get(el);
+    if (placeholder?.dataset?.cvHeight) {
+      const stored = parseFloat(placeholder.dataset.cvHeight);
+      if (Number.isFinite(stored)) return Math.max(PLACEHOLDER_HEIGHT, stored);
+    }
+    if (el.dataset?.cvHeight) {
+      const stored = parseFloat(el.dataset.cvHeight);
+      if (Number.isFinite(stored)) return Math.max(PLACEHOLDER_HEIGHT, stored);
+    }
+    return PLACEHOLDER_HEIGHT;
+  }
+
+  function hasMeasuredHeight(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el.dataset?.cvMeasured === '1') return true;
+    const placeholder = placeholderForNode.get(el);
+    if (placeholder?.dataset?.cvMeasured === '1') return true;
+    const info = detachedInfo.get(el);
+    return !!(info && typeof info.height === 'number');
+  }
+
+  function ensureMeasured(el) {
+    if (!(el instanceof HTMLElement)) return true;
+    if (collapsedFlag.get(el)) return true;
+    if (hasMeasuredHeight(el)) return true;
+    if (measurementQueue.has(el)) return false;
+    measurementQueue.add(el);
+    if (!measurementHandle) {
+      measurementHandle = scheduleIdle(processMeasurementQueue);
+    }
+    return false;
+  }
+
+  function processMeasurementQueue(deadline) {
+    measurementHandle = null;
+    let processed = 0;
+    const iterator = measurementQueue.values();
+    const queue = [];
+    for (const el of iterator) {
+      queue.push(el);
+    }
+    measurementQueue.clear();
+    while (queue.length > 0) {
+      const el = queue.shift();
+      if (!(el instanceof HTMLElement)) continue;
+      if (!el.isConnected) continue;
+      if (collapsedFlag.get(el)) continue;
+      const viewport = getRootViewportRect();
+      const scrollTop = getScrollTop();
+      const rect = el.getBoundingClientRect();
+      const height = Math.max(rect.height || 0, PLACEHOLDER_HEIGHT);
+      const placeholder = ensurePlaceholder(el, height);
+      placeholder.dataset.cvMeasured = '1';
+      placeholder.dataset.cvHeight = String(height);
+      placeholder.dataset.cvCollapsedHeight = placeholder.dataset.cvCollapsedHeight || `${height}px`;
+      placeholder.style.height = placeholder.dataset.cvCollapsedHeight;
+      placeholder.style.minHeight = placeholder.dataset.cvCollapsedHeight;
+      el.dataset.cvMeasured = '1';
+      el.dataset.cvHeight = String(height);
+      el.dataset.cvMeasuredScrollTop = String(scrollTop);
+      el.dataset.cvMeasuredViewportTop = String(viewport.top || 0);
+      el.dataset.cvMeasuredBottom = String(rect.bottom || 0);
+      el.dataset.cvMeasuredTop = String(rect.top || 0);
+      processed += 1;
+      if (deadline && typeof deadline.timeRemaining === 'function' && deadline.timeRemaining() <= 1) {
+        break;
+      }
+      if (!deadline && processed >= 4) {
+        break;
+      }
+    }
+    if (queue.length > 0) {
+      queue.forEach(el => {
+        if (el instanceof HTMLElement && !collapsedFlag.get(el)) measurementQueue.add(el);
+      });
+      if (!measurementHandle) {
+        measurementHandle = scheduleIdle(processMeasurementQueue);
+      }
+    } else if (measurementQueue.size > 0 && !measurementHandle) {
+      measurementHandle = scheduleIdle(processMeasurementQueue);
+    }
+    if (processed > 0) {
+      virtualizationDirty = true;
+      if (!enabled) return;
+      if (!streamLock) {
+        virtualize({ force: true });
+      }
+    }
   }
 
   function restoreUltraBackfill() {
@@ -724,20 +874,6 @@
       if (restored >= maxToRestore) break;
     }
     if (restored > 0) updateHUD();
-  }
-
-  function observeForNode(el) {
-    if (!io) return;
-    const placeholder = placeholderForNode.get(el);
-    try { io.unobserve(el); } catch {}
-    if (placeholder) {
-      try { io.unobserve(placeholder); } catch {}
-    }
-    const usePlaceholder = collapsedFlag.get(el) && placeholder;
-    const target = usePlaceholder && placeholder.isConnected ? placeholder : el;
-    if (target) {
-      try { io.observe(target); } catch {}
-    }
   }
 
   function cleanupOrphanPlaceholders() {
@@ -770,13 +906,7 @@
     if (collapsedFlag.get(el) && !detachedInfo.has(el)) return;
     if (!(el instanceof HTMLElement) || !el.parentElement) return;
     originalHTML.set(el, el.innerHTML);
-    const rect = el.getBoundingClientRect();
-    let height = Math.max(rect.height || 0, PLACEHOLDER_HEIGHT);
-    const existingPlaceholder = placeholderForNode.get(el);
-    if (height <= PLACEHOLDER_HEIGHT && existingPlaceholder?.dataset?.cvHeight) {
-      const stored = parseFloat(existingPlaceholder.dataset.cvHeight);
-      if (Number.isFinite(stored)) height = Math.max(height, stored);
-    }
+    const height = getStoredHeight(el);
     const placeholder = ensurePlaceholder(el, height);
     const parent = el.parentElement;
     if (placeholder.parentElement !== parent) {
@@ -791,12 +921,13 @@
     stylePlaceholderAppearance(placeholder);
     el.innerHTML = '';
     el.style.display = 'none';
+    el.style.contain = 'layout paint size';
+    el.style.contentVisibility = 'hidden';
     el.dataset.cvCollapsed = '1';
     detachedInfo.delete(el);
     markCollapsed(el);
     userExpanded.delete(el);
     visibleNodes.delete(el);
-    if (io) observeForNode(el);
   }
 
   function collapseMessageUltra(el) {
@@ -804,18 +935,8 @@
     const info = detachedInfo.get(el);
     const parent = el.parentElement || info?.parent || placeholderForNode.get(el)?.parentElement;
     if (!parent) return;
-    let height = PLACEHOLDER_HEIGHT;
-    let rect = { height: PLACEHOLDER_HEIGHT, top: 0, bottom: 0 };
-    if (el.isConnected) {
-      rect = el.getBoundingClientRect();
-      height = Math.max(rect.height || 0, PLACEHOLDER_HEIGHT);
-    } else {
-      const existingPlaceholder = placeholderForNode.get(el);
-      if (existingPlaceholder?.dataset?.cvHeight) {
-        const stored = parseFloat(existingPlaceholder.dataset.cvHeight);
-        if (Number.isFinite(stored)) height = Math.max(height, stored);
-      }
-    }
+    if (detachedInfo.has(el) && collapsedFlag.get(el)) return;
+    const height = getStoredHeight(el);
     const placeholder = ensurePlaceholder(el, height);
     if (placeholder.parentElement !== parent) {
       parent.insertBefore(placeholder, el.isConnected ? el : null);
@@ -833,8 +954,17 @@
     placeholder.style.pointerEvents = 'none';
     placeholder.dataset.cvDetached = '1';
     stylePlaceholderAppearance(placeholder);
+    const measuredScrollTop = parseFloat(el.dataset?.cvMeasuredScrollTop || 'NaN');
+    const measuredViewportTop = parseFloat(el.dataset?.cvMeasuredViewportTop || 'NaN');
+    const measuredBottom = parseFloat(el.dataset?.cvMeasuredBottom || 'NaN');
+    const currentScrollTop = getScrollTop();
     const viewport = getRootViewportRect();
-    const isAboveViewport = el.isConnected && rect.bottom <= viewport.top;
+    const scrollDelta = Number.isFinite(measuredScrollTop) ? currentScrollTop - measuredScrollTop : 0;
+    const viewportDelta = Number.isFinite(measuredViewportTop) ? viewport.top - measuredViewportTop : 0;
+    const projectedBottom = Number.isFinite(measuredBottom)
+      ? measuredBottom + viewportDelta - scrollDelta
+      : Infinity;
+    const isAboveViewport = Number.isFinite(projectedBottom) && projectedBottom <= viewport.top;
     if (el.parentElement === parent) {
       parent.removeChild(el);
     }
@@ -842,11 +972,10 @@
       shiftScrollBy(height);
     }
     el.dataset.cvCollapsed = '1';
-    detachedInfo.set(el, { parent, placeholder });
+    detachedInfo.set(el, { parent, placeholder, height });
     markCollapsed(el);
     userExpanded.delete(el);
     visibleNodes.delete(el);
-    if (io) observeForNode(el);
   }
 
   function expandMessage(el) {
@@ -872,29 +1001,12 @@
       placeholder.dataset.cvDetached = '0';
     }
     el.style.removeProperty('display');
+    el.style.removeProperty('contain');
+    el.style.removeProperty('content-visibility');
     delete el.dataset.cvCollapsed;
     detachedInfo.delete(el);
     markExpanded(el);
-    if (io) observeForNode(el);
-  }
-
-  function rebuildObserver() {
-    const root = rootScrollEl instanceof Element ? rootScrollEl : null;
-    if (io) {
-      if (io.root !== root) {
-        io.disconnect();
-        io = null;
-        visibleNodes = new WeakSet();
-      } else {
-        io.disconnect();
-      }
-    }
-    if (!io) {
-      io = new IntersectionObserver(handleIntersection, {
-        root,
-        threshold: [0, 0.05]
-      });
-    }
+    if (!hasMeasuredHeight(el)) ensureMeasured(el);
   }
 
   function ensureScrollTarget() {
@@ -938,10 +1050,20 @@
     });
   }
 
-  function virtualize() {
+  function virtualize(options) {
+    const opts = typeof options === 'boolean'
+      ? { force: options }
+      : (typeof options === 'object' && options !== null ? options : {});
+    const force = !!opts.force;
     if (!isChatPage() || !enabled) return;
     ensureHUD();
     cleanupOrphanPlaceholders();
+
+    if (!force && streamLock) {
+      updateStreamLock();
+      updateHUD();
+      return;
+    }
 
     const main = document.querySelector('main');
     if (main) {
@@ -956,20 +1078,44 @@
     }
 
     const now = Date.now();
-    if (now - lastScanAt < SCAN_INTERVAL_MS) return;
-    lastScanAt = now;
-
-    messageNodes = pickMessageNodes();
-    if (messageNodes.length === 0) {
-      collapsedTotal = 0;
+    const hasChanges = virtualizationDirty || messageNodesDirty || messageRevision !== lastVirtualizedRevision;
+    if (!force && !hasChanges) {
+      if (lastScanAt && now - lastScanAt < SCAN_INTERVAL_MS) {
+        updateStreamLock();
+        updateHUD();
+        return;
+      }
+      lastScanAt = now;
+      updateStreamLock();
       updateHUD();
       return;
     }
 
-    rebuildObserver();
+    lastScanAt = now;
 
-    // Only last N expanded; everything else collapsed unless visible or user expanded
+    if (messageNodesDirty || messageNodes.length === 0) {
+      rebuildMessageNodes();
+    }
+
+    if (messageNodes.length === 0) {
+      collapsedTotal = 0;
+      virtualizationDirty = false;
+      lastVirtualizedRevision = messageRevision;
+      updateHUD();
+      updateStreamLock();
+      return;
+    }
+
+    const guardCount = Math.max(0, maxAlwaysVisibleTail + 2);
+    const guardStart = Math.max(0, messageNodes.length - guardCount);
+
     messageNodes.forEach((el, idx) => {
+      if (!(el instanceof HTMLElement)) return;
+      if (idx >= guardStart) {
+        expandMessage(el);
+        visibleNodes.add(el);
+        return;
+      }
       if (shouldSkipVirtualization(el)) {
         expandMessage(el);
         visibleNodes.add(el);
@@ -978,25 +1124,73 @@
       const nearTail = isNearTail(idx, messageNodes.length);
       if (nearTail || userExpanded.has(el) || visibleNodes.has(el)) {
         expandMessage(el);
-      } else {
-        collapseMessage(el);
+        return;
       }
+      if (!collapsedFlag.get(el)) {
+        if (!ensureMeasured(el)) {
+          visibleNodes.add(el);
+          return;
+        }
+      }
+      collapseMessage(el);
     });
 
-    if (io) {
-      messageNodes.forEach(el => {
-        observeForNode(el);
-      });
-    }
     expandVisibleCollapsed();
     if (ultraMode) restoreUltraBackfill();
     syncCollapsedCount();
     updateHUD();
+
+    virtualizationDirty = false;
+    messageNodesDirty = false;
+    lastVirtualizedRevision = messageRevision;
+    updateStreamLock();
+  }
+
+  function updateStreamLock() {
+    if (messageNodes.length === 0) {
+      streamLock = false;
+      if (streamLockTimer) {
+        clearTimeout(streamLockTimer);
+        streamLockTimer = null;
+      }
+      return;
+    }
+    const last = messageNodes[messageNodes.length - 1];
+    if (!(last instanceof HTMLElement)) {
+      streamLock = false;
+      if (streamLockTimer) {
+        clearTimeout(streamLockTimer);
+        streamLockTimer = null;
+      }
+      return;
+    }
+    const streaming = isMessageStreaming(last);
+    if (streaming) {
+      if (!streamLock) streamLock = true;
+      if (streamLockTimer) {
+        clearTimeout(streamLockTimer);
+        streamLockTimer = null;
+      }
+      return;
+    }
+    if (!streamLock) return;
+    if (streamLockTimer) return;
+    streamLockTimer = setTimeout(() => {
+      streamLockTimer = null;
+      streamLock = false;
+      virtualizationDirty = true;
+      if (!enabled) return;
+      virtualize({ force: true });
+    }, STREAM_LOCK_RELEASE_DELAY_MS);
   }
 
   function expandAllAndDisable() {
-    if (io) io.disconnect();
     visibleNodes = new WeakSet();
+    if (streamLockTimer) {
+      clearTimeout(streamLockTimer);
+      streamLockTimer = null;
+    }
+    streamLock = false;
     messageNodes.forEach(el => {
       expandMessage(el);
       userExpanded.delete(el);
@@ -1020,9 +1214,29 @@
     updateHUD();
   }, { passive: true });
 
-  const mo = new MutationObserver(() => {
+  const mo = new MutationObserver((records) => {
     if (!enabled) return;
-    clearTimeout(mo._t); mo._t = setTimeout(() => { virtualize(); }, 180);
+    let touched = false;
+    for (const record of records) {
+      record.addedNodes?.forEach(node => {
+        if (!(node instanceof HTMLElement)) return;
+        if (addMessageNode(node)) touched = true;
+      });
+      record.removedNodes?.forEach(node => {
+        if (!(node instanceof HTMLElement)) return;
+        if (removeMessageNode(node)) touched = true;
+      });
+      if (!touched && record.type === 'childList' && record.target && record.addedNodes?.length === 0 && record.removedNodes?.length === 0) {
+        // Structural change we didn't catch
+        messageNodesDirty = true;
+      }
+    }
+    if (touched) updateStreamLock();
+    if (streamLock) return;
+    if (touched || messageNodesDirty) {
+      clearTimeout(mo._t);
+      mo._t = setTimeout(() => { virtualize(); }, MUTATION_DEBOUNCE_MS);
+    }
   });
 
   function boot() {
@@ -1051,12 +1265,22 @@
       if (!msg?.type) return;
       if (msg.type === 'CV_TOGGLE') {
         enabled = !!msg.enabled;
-        if (enabled) virtualize(); else expandAllAndDisable();
+        if (enabled) {
+          virtualizationDirty = true;
+          virtualize();
+        } else {
+          expandAllAndDisable();
+        }
         updateHUD();
       }
       if (msg.type === 'CV_APPLY') {
         enabled = !!msg.enabled;
-        if (enabled) virtualize(); else expandAllAndDisable();
+        if (enabled) {
+          virtualizationDirty = true;
+          virtualize();
+        } else {
+          expandAllAndDisable();
+        }
         updateHUD();
       }
     });
