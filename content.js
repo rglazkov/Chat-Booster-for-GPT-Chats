@@ -56,6 +56,7 @@
   let hudPosition = null;
   let hudSettingsVisible = false;
   let hudCollapsed = false;
+  let hudTailInputFocused = false;
 
   function clampTail(value) {
     const num = Math.floor(Number(value));
@@ -225,7 +226,13 @@
         window.open(location.href, '_blank', 'noopener');
       } catch {}
     });
-    topRow.appendChild(hudReopenBtn);
+
+    const reopenRow = document.createElement('div');
+    reopenRow.style.display = 'flex';
+    reopenRow.style.alignItems = 'center';
+    reopenRow.style.justifyContent = 'flex-start';
+    reopenRow.style.gap = '8px';
+    reopenRow.appendChild(hudReopenBtn);
 
     const controlsRow = document.createElement('div');
     controlsRow.style.display = 'flex';
@@ -292,11 +299,15 @@
     hudTailInputEl.style.padding = '2px 4px';
     hudTailInputEl.style.border = '1px solid currentColor';
     hudTailInputEl.style.borderRadius = '6px';
+    hudTailInputEl.addEventListener('focus', () => {
+      hudTailInputFocused = true;
+    });
     hudTailInputEl.addEventListener('change', () => {
       const next = clampTail(parseInt(hudTailInputEl.value, 10));
       setMaxAlwaysVisibleTail(next);
     });
     hudTailInputEl.addEventListener('blur', () => {
+      hudTailInputFocused = false;
       hudTailInputEl.value = maxAlwaysVisibleTail;
     });
 
@@ -304,6 +315,7 @@
     hudSettingsEl.appendChild(label);
 
     hudContentWrapperEl.appendChild(topRow);
+    hudContentWrapperEl.appendChild(reopenRow);
     hudContentWrapperEl.appendChild(controlsRow);
     hudContentWrapperEl.appendChild(hudSettingsEl);
     hudEl.appendChild(hudContentWrapperEl);
@@ -352,7 +364,7 @@
       hudTailLabelEl.setAttribute('aria-expanded', String(hudSettingsVisible));
     }
     if (hudSettingsEl) hudSettingsEl.style.display = hudSettingsVisible ? 'flex' : 'none';
-    if (hudTailInputEl) hudTailInputEl.value = maxAlwaysVisibleTail;
+    if (hudTailInputEl && !hudTailInputFocused) hudTailInputEl.value = maxAlwaysVisibleTail;
     if (hudCollapseBtn) {
       hudCollapseBtn.textContent = hudCollapsed ? 'Show' : 'Hide';
       hudCollapseBtn.setAttribute('aria-pressed', hudCollapsed ? 'true' : 'false');
@@ -528,6 +540,18 @@
 
   function stylePlaceholderAppearance(ph) {
     if (!(ph instanceof HTMLElement)) return;
+    const detached = ph.dataset?.cvDetached === '1';
+    if (detached) {
+      ph.style.opacity = '0';
+      ph.style.pointerEvents = 'none';
+      ph.style.border = '0';
+      ph.style.background = 'transparent';
+      ph.style.color = 'transparent';
+      ph.textContent = '';
+      ph.style.minHeight = '1px';
+      ph.style.height = ph.style.height && ph.style.height !== '0px' ? ph.style.height : '1px';
+      return;
+    }
     ph.style.opacity = hudCollapsed ? '0' : '0.55';
     ph.style.pointerEvents = hudCollapsed ? 'none' : 'auto';
     ph.style.border = hudCollapsed ? '0' : '1px dashed currentColor';
@@ -597,8 +621,8 @@
     if (placeholder) {
       try { io.unobserve(placeholder); } catch {}
     }
-    const usePlaceholder = collapsedFlag.get(el) && placeholder && !(ultraMode && placeholder.dataset?.cvDetached === '1');
-    const target = usePlaceholder ? placeholder : el;
+    const usePlaceholder = collapsedFlag.get(el) && placeholder;
+    const target = usePlaceholder && placeholder.isConnected ? placeholder : el;
     if (target) {
       try { io.observe(target); } catch {}
     }
@@ -669,13 +693,16 @@
     if (placeholder.parentElement !== parent) {
       parent.insertBefore(placeholder, el.isConnected ? el : null);
     }
-    placeholder.style.display = 'none';
-    placeholder.style.height = '0px';
+    placeholder.style.display = 'block';
+    placeholder.style.height = '1px';
+    placeholder.style.minHeight = '1px';
     placeholder.style.marginTop = '0';
     placeholder.style.marginBottom = '0';
     placeholder.style.marginLeft = '0';
     placeholder.style.marginRight = '0';
     placeholder.style.padding = '0';
+    placeholder.style.opacity = '0';
+    placeholder.style.pointerEvents = 'none';
     placeholder.dataset.cvDetached = '1';
     if (el.parentElement === parent) {
       parent.removeChild(el);
@@ -756,7 +783,6 @@
     placeholders.forEach(ph => {
       const container = nodeForPlaceholder.get(ph);
       if (!container || !collapsedFlag.get(container)) return;
-      if (ultraMode && ph.dataset?.cvDetached === '1') return;
       const rect = ph.getBoundingClientRect();
       if (!rect) return;
       if (rect.bottom < 0 || rect.top > viewportHeight) return;
