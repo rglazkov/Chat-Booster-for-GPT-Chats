@@ -164,9 +164,40 @@ class FakeElement {
     if (selector === 'span') return this.tagName === 'SPAN';
     if (selector === '.cv-placeholder') return this.className === 'cv-placeholder';
     if (selector === '[data-testid="conversation-turn"]') return this.dataset.testid === 'conversation-turn';
+    if (selector === '[data-testid="conversation-scroll-container"]') {
+      return this.dataset.testid === 'conversation-scroll-container';
+    }
+    if (selector === '[data-testid="conversation-scroll"]') {
+      return this.dataset.testid === 'conversation-scroll';
+    }
+    if (selector === '[data-testid="scroll-container"]') {
+      return this.dataset.testid === 'scroll-container';
+    }
+    if (selector === '[data-testid="page"]') {
+      return this.dataset.testid === 'page';
+    }
+    if (selector === '[data-testid*="conversation-turn"]') {
+      return (this.dataset.testid || '').toLowerCase().includes('conversation-turn');
+    }
+    if (selector === '[data-testid="conversation-message"]') {
+      return this.dataset.testid === 'conversation-message';
+    }
+    if (selector === '[data-testid*="conversation-message"]') {
+      return (this.dataset.testid || '').toLowerCase().includes('conversation-message');
+    }
+    if (selector === '[data-testid="chat-message"]') {
+      return this.dataset.testid === 'chat-message';
+    }
+    if (selector === '[data-testid*="chat-message"]') {
+      return (this.dataset.testid || '').toLowerCase().includes('chat-message');
+    }
     if (selector === '[data-testid="message-bubble"]') return this.dataset.testid === 'message-bubble';
     if (selector === '[data-message-id]') return this.dataset.messageId !== undefined;
+    if (selector === '[data-entry-id]') return this.dataset.entryId !== undefined;
     if (selector === 'div[role="listitem"]') return this.tagName === 'DIV' && this.role === 'listitem';
+    if (selector === 'li[role="listitem"]') return this.tagName === 'LI' && this.role === 'listitem';
+    if (selector === 'section[role="listitem"]') return this.tagName === 'SECTION' && this.role === 'listitem';
+    if (selector === 'article[role="listitem"]') return this.tagName === 'ARTICLE' && this.role === 'listitem';
     if (selector === '[data-testid*="thinking" i]') return (this.dataset.testid || '').toLowerCase().includes('thinking');
     if (selector === '[data-testid*="spinner" i]') return (this.dataset.testid || '').toLowerCase().includes('spinner');
     if (selector === '[data-message-author-role="assistant"][data-state]') {
@@ -379,7 +410,11 @@ function setup() {
   };
   global.Element = FakeElement;
   global.HTMLElement = FakeElement;
-  global.location = { host: 'chat.openai.com', href: 'https://chat.openai.com' };
+  global.location = {
+    host: 'chat.openai.com',
+    hostname: 'chat.openai.com',
+    href: 'https://chat.openai.com'
+  };
   global.chrome = {
     storage: {
       local: {
@@ -493,6 +528,29 @@ function buildConversation(main, count, { streamingLast = false, offsetTop = 0 }
   return created;
 }
 
+function buildListConversation(main, count, { offsetTop = 0 } = {}) {
+  const list = new FakeElement('ul');
+  main.appendChild(list);
+  const created = [];
+  for (let i = 0; i < count; i += 1) {
+    const li = new FakeElement('li');
+    li.setAttribute('role', 'listitem');
+    li.setAttribute('data-entry-id', `entry-${i}`);
+    const top = offsetTop + i * 140;
+    li.setBoundingClientRect({ top, bottom: top + 110, height: 110 });
+    const article = new FakeElement('article');
+    article.dataset.testid = 'chat-message';
+    article.setAttribute('data-message-id', `list-${i}`);
+    article.dataset.messageAuthorRole = i % 2 === 0 ? 'user' : 'assistant';
+    article.textContent = `list-message-${i}`;
+    li.appendChild(article);
+    list.appendChild(li);
+    created.push(li);
+  }
+  list._propagateConnection(true);
+  return created;
+}
+
 async function forceVirtualize(hooks, iterations = 1) {
   for (let i = 0; i < iterations; i += 1) {
     hooks.virtualize({ force: true });
@@ -522,6 +580,33 @@ test('virtualization collapses older messages in strict mode', async () => {
     const placeholders = document.querySelectorAll('.cv-placeholder');
     assert.strictEqual(placeholders.length, collapsedCount);
     assert.strictEqual(hooks.getHudStatusText(), `Chat Booster: ${collapsedCount} optimized`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('virtualization recognizes list-based chat layout on chatgpt.com', async () => {
+  const { hooks, document, cleanup } = setup();
+  try {
+    const main = new FakeElement('main');
+    document.body.appendChild(main);
+    main._propagateConnection(true);
+
+    buildListConversation(main, 28, { offsetTop: -560 });
+
+    global.location.host = 'chatgpt.com';
+    global.location.hostname = 'chatgpt.com';
+    global.location.href = 'https://chatgpt.com/c/123';
+
+    hooks.setUltraMode(false);
+    const boot = global.__CHAT_BOOSTER_MANUAL_BOOT__;
+    boot();
+    await forceVirtualize(hooks, 3);
+
+    const collapsedCount = hooks.getCollapsedTotal();
+    assert.ok(collapsedCount >= 10, 'expected collapsed messages in list layout');
+    const collapsedNodes = hooks.getMessageNodes().filter(node => node.dataset?.cvCollapsed === '1');
+    assert.ok(collapsedNodes.length > 0, 'expected at least one collapsed list item');
   } finally {
     cleanup();
   }
