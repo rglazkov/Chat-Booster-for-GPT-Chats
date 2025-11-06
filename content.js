@@ -22,6 +22,8 @@
   let messageNodes = [];
   let io = null;
   let rootScrollEl = null;
+  let scrollTarget = null;
+  let scrollTicking = false;
   let lastScanAt = 0;
 
   let maxAlwaysVisibleTail = MAX_ALWAYS_VISIBLE_TAIL;
@@ -385,6 +387,46 @@
     }
   }
 
+  function ensureScrollTarget() {
+    const nextRoot = rootScrollEl instanceof Element ? rootScrollEl : null;
+    const nextTarget = nextRoot || window;
+    if (scrollTarget === nextTarget) return;
+    if (scrollTarget) {
+      try { scrollTarget.removeEventListener('scroll', handleScroll); }
+      catch {}
+    }
+    scrollTarget = nextTarget;
+    scrollTarget.addEventListener('scroll', handleScroll, { passive: true });
+  }
+
+  function expandVisibleCollapsed() {
+    if (!enabled) return;
+    const placeholders = document.querySelectorAll('.cv-placeholder');
+    if (placeholders.length === 0) return;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    placeholders.forEach(ph => {
+      const container = ph.parentElement;
+      if (!container || !collapsedFlag.get(container)) return;
+      const rect = container.getBoundingClientRect();
+      if (!rect) return;
+      if (rect.bottom < 0 || rect.top > viewportHeight) return;
+      const wasCollapsed = collapsedFlag.get(container);
+      expandMessage(container);
+      if (wasCollapsed) visibleNodes.add(container);
+    });
+    updateHUD();
+  }
+
+  function handleScroll() {
+    if (!enabled) return;
+    if (scrollTicking) return;
+    scrollTicking = true;
+    requestAnimationFrame(() => {
+      scrollTicking = false;
+      expandVisibleCollapsed();
+    });
+  }
+
   function virtualize() {
     if (!isChatPage() || !enabled) return;
     ensureHUD();
@@ -393,6 +435,12 @@
     if (main) {
       main.style.contain = 'layout paint';
       main.style.contentVisibility = 'auto';
+    }
+
+    const nextRoot = findScrollRoot();
+    if (nextRoot !== rootScrollEl) {
+      rootScrollEl = nextRoot;
+      ensureScrollTarget();
     }
 
     const now = Date.now();
@@ -419,6 +467,7 @@
         try { io.observe(el); } catch {}
       });
     }
+    expandVisibleCollapsed();
     updateHUD();
   }
 
@@ -453,6 +502,7 @@
     if (initialized) return;
     initialized = true;
     rootScrollEl = findScrollRoot();
+    ensureScrollTarget();
     ensureHUD();
     try {
       const root = document.querySelector('main') || document.body;
