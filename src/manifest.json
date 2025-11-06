@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Chat Booster for GPT Chats",
+  "description": "Boost performance on very long GPT chats by aggressive virtualization.",
+  "version": "0.3.0",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Chat Booster for GPT Chats",
+    "default_icon": {
+      "16": "icons/icon16-gray.png",
+      "32": "icons/icon32-gray.png",
+      "48": "icons/icon48-gray.png",
+      "128": "icons/icon128-gray.png"
+    }
+  },
+  "background": { "service_worker": "background.js" },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://chat.openai.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "toggle-virtualizer": {
+      "suggested_key": { "default": "Ctrl+Shift+V" },
+      "description": "Enable/Disable Chat Booster for GPT Chats on this tab"
+    }
+  }
+}
