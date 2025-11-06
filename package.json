@@ -1,0 +1,9 @@
+{
+  "name": "chat-booster-for-gpt-chats",
+  "version": "0.4.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  }
+}
