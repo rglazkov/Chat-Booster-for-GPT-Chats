@@ -230,6 +230,9 @@ class FakeElement {
       const classes = this.className.split(/\s+/);
       return classes.includes('group') && classes.includes('w-full') && this.closest('main');
     }
+    if (/^[a-z][a-z0-9-]*$/i.test(selector)) {
+      return this.tagName === selector.toUpperCase();
+    }
     return false;
   }
 
@@ -598,6 +601,37 @@ test('virtualization collapses older messages in strict mode', async () => {
     const placeholders = document.querySelectorAll('.cv-placeholder');
     assert.strictEqual(placeholders.length, collapsedCount);
     assert.strictEqual(hooks.getHudStatusText(), `Chat Booster: ${collapsedCount} optimized`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('ultra mode HUD reflects collapsed count and disables animations', async () => {
+  const { hooks, document, cleanup } = setup();
+  try {
+    const main = new FakeElement('main');
+    document.body.appendChild(main);
+    main._propagateConnection(true);
+
+    buildConversation(main, 28, { streamingLast: false, offsetTop: -520 });
+
+    global.__CHAT_BOOSTER_MANUAL_BOOT__();
+    await forceVirtualize(hooks, 3);
+
+    const collapsedCount = hooks.getCollapsedTotal();
+    assert.ok(collapsedCount > 0, 'expected collapsed messages in ultra mode');
+    assert.strictEqual(hooks.getHudStatusText(), `Chat Booster: ${collapsedCount} optimized`);
+
+    const styleElements = document.documentElement.querySelectorAll('style');
+    const ultraStyles = styleElements.filter(el => (el.textContent || '').includes('animation: none'));
+    assert.ok(ultraStyles.length > 0, 'expected injected ultra motion style');
+
+    hooks.setUltraMode(false);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const remainingStyles = document.documentElement
+      .querySelectorAll('style')
+      .filter(el => (el.textContent || '').includes('animation: none'));
+    assert.strictEqual(remainingStyles.length, 0, 'expected ultra motion style removed when disabled');
   } finally {
     cleanup();
   }

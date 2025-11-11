@@ -64,6 +64,7 @@
 
   const originalHTML = new WeakMap();
   const collapsedFlag = new WeakMap();
+  const collapsedNodes = new Set();
   const userExpanded = new WeakSet();
   let visibleNodes = new WeakSet();
   let collapsedTotal = 0;
@@ -89,13 +90,15 @@
   let hudSettingsVisible = false;
   let hudCollapsed = false;
   let hudTailInputFocused = false;
+  let ultraMotionStyleEl = null;
 
   function markCollapsed(el) {
     if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
     if (wasCollapsed) return false;
     collapsedFlag.set(el, true);
-    collapsedTotal += 1;
+    collapsedNodes.add(el);
+    collapsedTotal = collapsedNodes.size;
     return true;
   }
 
@@ -104,14 +107,18 @@
     const wasCollapsed = collapsedFlag.get(el) === true;
     if (!wasCollapsed) return false;
     collapsedFlag.delete(el);
-    if (collapsedTotal > 0) collapsedTotal -= 1;
+    collapsedNodes.delete(el);
+    collapsedTotal = collapsedNodes.size;
     return true;
   }
 
   function forgetCollapsed(el) {
     if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
-    if (wasCollapsed && collapsedTotal > 0) collapsedTotal -= 1;
+    if (wasCollapsed) {
+      collapsedNodes.delete(el);
+      collapsedTotal = collapsedNodes.size;
+    }
     collapsedFlag.delete(el);
     return wasCollapsed;
   }
@@ -125,6 +132,7 @@
     for (const el of messageNodes) {
       if (collapsedFlag.get(el)) next += 1;
     }
+    if (collapsedNodes.size > next) next = collapsedNodes.size;
     collapsedCountDirty = false;
     const changed = collapsedTotal !== next;
     collapsedTotal = next;
@@ -193,6 +201,65 @@
     if (userExpanded.has(el)) return false;
     if (isMessageStreaming(el)) return true;
     return false;
+  }
+
+  const ULTRA_MOTION_STYLE = `
+    *, *::before, *::after {
+      animation: none !important;
+      animation-play-state: paused !important;
+      transition: none !important;
+    }
+    html, body, body * {
+      scroll-behavior: auto !important;
+    }
+  `;
+
+  function ensureUltraMotionStyle() {
+    if (typeof document === 'undefined') return null;
+    if (ultraMotionStyleEl && ultraMotionStyleEl.isConnected) {
+      if (!ultraMotionStyleEl.textContent) ultraMotionStyleEl.textContent = ULTRA_MOTION_STYLE;
+      return ultraMotionStyleEl;
+    }
+    const style = ultraMotionStyleEl || document.createElement('style');
+    style.textContent = ULTRA_MOTION_STYLE;
+    const target = document.head || document.documentElement || document.body;
+    if (target && style.parentElement !== target) {
+      target.appendChild(style);
+    }
+    ultraMotionStyleEl = style;
+    return ultraMotionStyleEl;
+  }
+
+  function removeUltraMotionStyle() {
+    if (ultraMotionStyleEl && ultraMotionStyleEl.parentElement) {
+      ultraMotionStyleEl.parentElement.removeChild(ultraMotionStyleEl);
+    }
+    ultraMotionStyleEl = null;
+  }
+
+  function applyUltraScrollBehavior(enabledOnly) {
+    if (typeof document === 'undefined') return;
+    const candidates = new Set();
+    if (document.documentElement instanceof HTMLElement) candidates.add(document.documentElement);
+    if (document.body instanceof HTMLElement) candidates.add(document.body);
+    if (document.scrollingElement instanceof HTMLElement) candidates.add(document.scrollingElement);
+    if (rootScrollEl instanceof HTMLElement) candidates.add(rootScrollEl);
+    candidates.forEach(el => {
+      try {
+        if (enabledOnly) el.style.setProperty('scroll-behavior', 'auto', 'important');
+        else el.style.removeProperty('scroll-behavior');
+      } catch {}
+    });
+  }
+
+  function updateUltraMotionPreferences() {
+    if (ultraMode && enabled) {
+      ensureUltraMotionStyle();
+      applyUltraScrollBehavior(true);
+    } else {
+      removeUltraMotionStyle();
+      applyUltraScrollBehavior(false);
+    }
   }
 
   function loadTailSetting() {
@@ -266,6 +333,7 @@
     const shouldPersist = !!persist;
     const changed = ultraMode !== next;
     ultraMode = next;
+    updateUltraMotionPreferences();
     if (shouldPersist && chrome?.storage?.local?.set) {
       try { chrome.storage.local.set({ [ULTRA_STORAGE_KEY]: next }); }
       catch {}
@@ -1177,6 +1245,7 @@
     if (nextRoot !== rootScrollEl) {
       rootScrollEl = nextRoot;
       ensureScrollTarget();
+      updateUltraMotionPreferences();
     }
 
     const now = Date.now();
@@ -1200,6 +1269,7 @@
     }
 
     if (messageNodes.length === 0) {
+      collapsedNodes.clear();
       collapsedTotal = 0;
       collapsedCountDirty = false;
       virtualizationDirty = false;
@@ -1332,7 +1402,12 @@
     const wasCollapsed = collapsedFlag.get(container);
     expandMessage(container);
     if (wasCollapsed && !ultraMode) userExpanded.add(container);
-    container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    try {
+      const behavior = ultraMode ? 'auto' : 'smooth';
+      container.scrollIntoView({ block: 'nearest', behavior });
+    } catch {
+      try { container.scrollIntoView(); } catch {}
+    }
     updateHUD();
   }, { passive: true });
 
@@ -1374,6 +1449,7 @@
     initialized = true;
     rootScrollEl = findScrollRoot();
     ensureScrollTarget();
+    updateUltraMotionPreferences();
     ensureHUD();
     try {
       const root = document.querySelector('main') || document.body;
@@ -1408,6 +1484,7 @@
         } else {
           expandAllAndDisable();
         }
+        updateUltraMotionPreferences();
         updateHUD();
       }
       if (msg.type === 'CV_APPLY') {
@@ -1418,6 +1495,7 @@
         } else {
           expandAllAndDisable();
         }
+        updateUltraMotionPreferences();
         updateHUD();
       }
     });
@@ -1432,7 +1510,7 @@
       isMessageStreaming,
       shouldSkipVirtualization,
       setUltraMode: (value) => setUltraMode(value, false),
-      setRootScrollEl: (el) => { rootScrollEl = el; },
+      setRootScrollEl: (el) => { rootScrollEl = el; updateUltraMotionPreferences(); },
       getPlaceholderForNode: (el) => placeholderForNode.get(el),
       getDetachedInfo: (el) => detachedInfo.get(el) || null,
       getMessageNodes: () => messageNodes.slice(),
@@ -1442,7 +1520,7 @@
       updateStreamLock,
       syncCollapsedCount: (opts) => syncCollapsedCount(opts),
       getScrollTop,
-      setEnabled: (value) => { enabled = !!value; },
+      setEnabled: (value) => { enabled = !!value; updateUltraMotionPreferences(); },
       virtualize,
       boot,
       get visibleNodes() { return visibleNodes; },
