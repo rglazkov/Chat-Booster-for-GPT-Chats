@@ -50,6 +50,8 @@
   let virtualizationDirty = true;
   let streamLock = false;
   let streamLockTimer = null;
+  let streamMutationHintActive = false;
+  let streamMutationHintTimer = null;
   const measurementQueue = new Set();
   let measurementHandle = null;
   let rootScrollEl = null;
@@ -91,23 +93,25 @@
   function markCollapsed(el) {
     if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
+    if (wasCollapsed) return false;
     collapsedFlag.set(el, true);
-    if (!wasCollapsed) collapsedCountDirty = true;
-    return !wasCollapsed;
+    collapsedTotal += 1;
+    return true;
   }
 
   function markExpanded(el) {
     if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
-    if (wasCollapsed) collapsedCountDirty = true;
+    if (!wasCollapsed) return false;
     collapsedFlag.delete(el);
-    return wasCollapsed;
+    if (collapsedTotal > 0) collapsedTotal -= 1;
+    return true;
   }
 
   function forgetCollapsed(el) {
     if (!el) return false;
     const wasCollapsed = collapsedFlag.get(el) === true;
-    if (wasCollapsed) collapsedCountDirty = true;
+    if (wasCollapsed && collapsedTotal > 0) collapsedTotal -= 1;
     collapsedFlag.delete(el);
     return wasCollapsed;
   }
@@ -1071,7 +1075,14 @@
     delete el.dataset.cvCollapsed;
     detachedInfo.delete(el);
     const changed = markExpanded(el);
-    if (!virtualizationInProgress && changed) syncCollapsedCount();
+    if (!virtualizationInProgress) {
+      if (!ultraMode) userExpanded.add(el);
+      visibleNodes.add(el);
+    }
+    if (!virtualizationInProgress && changed) {
+      syncCollapsedCount();
+      updateHUD();
+    }
     if (!hasMeasuredHeight(el)) ensureMeasured(el);
   }
 
@@ -1085,6 +1096,31 @@
     }
     scrollTarget = nextTarget;
     scrollTarget.addEventListener('scroll', handleScroll, { passive: true });
+  }
+
+  function noteStreamMutation() {
+    if (streamMutationHintTimer) {
+      clearTimeout(streamMutationHintTimer);
+      streamMutationHintTimer = null;
+    }
+    streamMutationHintActive = true;
+    streamMutationHintTimer = setTimeout(() => {
+      streamMutationHintTimer = null;
+      streamMutationHintActive = false;
+      updateStreamLock();
+    }, STREAM_LOCK_RELEASE_DELAY_MS);
+    updateStreamLock();
+  }
+
+  function trackStreamMutationTarget(target) {
+    if (!target) return;
+    const element = target instanceof HTMLElement ? target : target.parentElement;
+    if (!(element instanceof HTMLElement)) return;
+    if (element.classList?.contains?.('cv-placeholder')) return;
+    const container = normalizeMessageNode(element);
+    if (!container) return;
+    const last = messageNodes.length > 0 ? messageNodes[messageNodes.length - 1] : null;
+    if (container === last) noteStreamMutation();
   }
 
   function expandVisibleCollapsed() {
@@ -1238,7 +1274,7 @@
       }
       return;
     }
-    const streaming = isMessageStreaming(last);
+    const streaming = streamMutationHintActive || isMessageStreaming(last);
     if (streaming) {
       if (!streamLock) streamLock = true;
       if (streamLockTimer) {
@@ -1265,6 +1301,11 @@
       streamLockTimer = null;
     }
     streamLock = false;
+    if (streamMutationHintTimer) {
+      clearTimeout(streamMutationHintTimer);
+      streamMutationHintTimer = null;
+    }
+    streamMutationHintActive = false;
     const prevState = virtualizationInProgress;
     virtualizationInProgress = true;
     try {
@@ -1299,14 +1340,22 @@
     if (!enabled) return;
     let touched = false;
     for (const record of records) {
+      if (record.type === 'characterData') {
+        trackStreamMutationTarget(record.target);
+        continue;
+      }
       record.addedNodes?.forEach(node => {
         if (!(node instanceof HTMLElement)) return;
         if (addMessageNode(node)) touched = true;
+        trackStreamMutationTarget(node);
       });
       record.removedNodes?.forEach(node => {
         if (!(node instanceof HTMLElement)) return;
         if (removeMessageNode(node)) touched = true;
       });
+      if (!touched) {
+        trackStreamMutationTarget(record.target);
+      }
       if (!touched && record.type === 'childList' && record.target && record.addedNodes?.length === 0 && record.removedNodes?.length === 0) {
         // Structural change we didn't catch
         messageNodesDirty = true;
@@ -1328,10 +1377,17 @@
     ensureHUD();
     try {
       const root = document.querySelector('main') || document.body;
-      mo.observe(root, { childList: true, subtree: true });
+      mo.observe(root, { childList: true, subtree: true, characterData: true });
     } catch {}
     virtualize();
-    setInterval(() => { if (enabled) virtualize(); }, SCAN_INTERVAL_MS);
+    setInterval(() => {
+      if (!enabled) return;
+      if (!virtualizationDirty && !messageNodesDirty) {
+        updateStreamLock();
+        return;
+      }
+      virtualize();
+    }, SCAN_INTERVAL_MS);
   }
 
   if (!AUTO_BOOT_DISABLED) {
