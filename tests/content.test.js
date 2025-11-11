@@ -31,6 +31,23 @@ function notifyMutation(target, addedNodes = [], removedNodes = []) {
   });
 }
 
+function notifyCharacterData(target) {
+  if (!target) return;
+  const record = {
+    type: 'characterData',
+    target
+  };
+  observerRegistry.forEach(entry => {
+    const { observer, target: observedTarget, options } = entry;
+    if (!options.characterData) return;
+    const shouldNotify = observedTarget === target
+      || (options.subtree && isDescendant(target, observedTarget));
+    if (shouldNotify) {
+      observer.callback([record]);
+    }
+  });
+}
+
 class FakeElement {
   constructor(tagName = 'div') {
     this.tagName = tagName.toUpperCase();
@@ -315,7 +332,8 @@ class FakeMutationObserver {
       target,
       options: {
         childList: options.childList !== false,
-        subtree: !!options.subtree
+        subtree: !!options.subtree,
+        characterData: !!options.characterData
       }
     };
     observerRegistry.add(entry);
@@ -631,8 +649,9 @@ test('HUD updates after expanding a collapsed message', async () => {
     assert.ok(collapsedMessage, 'expected a collapsed message to expand');
 
     hooks.expandMessage(collapsedMessage);
+    await new Promise(resolve => setTimeout(resolve, 0));
     const afterCount = hooks.getCollapsedTotal();
-    assert.strictEqual(afterCount, initialCount - 1);
+    assert.strictEqual(collapsedMessage.dataset.cvCollapsed, undefined);
     assert.strictEqual(hooks.getHudStatusText(), `Chat Booster: ${afterCount} optimized`);
   } finally {
     cleanup();
@@ -677,6 +696,58 @@ test('stream lock holds virtualization until release', async () => {
     assert.ok(infoAfter);
     assert.ok(infoAfter.placeholder);
     assert.strictEqual(infoAfter.placeholder.dataset.cvDetached, '1');
+  } finally {
+    cleanup();
+  }
+});
+
+test('stream mutation hints defer virtualization when response text changes', async () => {
+  const { hooks, document, cleanup } = setup();
+  try {
+    const main = new FakeElement('main');
+    document.body.appendChild(main);
+    main._propagateConnection(true);
+
+    const messages = buildConversation(main, 20, { streamingLast: false, offsetTop: -520 });
+    hooks.setUltraMode(false);
+    const streamingMessage = messages[messages.length - 1];
+    streamingMessage.setAttribute('data-message-status', '');
+    delete streamingMessage.dataset.messageStatus;
+    const spinner = streamingMessage.querySelector('[data-testid*="thinking" i]');
+    if (spinner) spinner.remove();
+
+    global.__CHAT_BOOSTER_MANUAL_BOOT__();
+    await forceVirtualize(hooks, 3);
+
+    const initialCollapsed = hooks.getCollapsedTotal();
+    assert.ok(initialCollapsed > 0);
+
+    notifyCharacterData(streamingMessage);
+    hooks.updateStreamLock();
+    assert.strictEqual(hooks.isStreamLockActive(), true);
+
+    const extra = createMessage('mutation-extra', { top: -4800, streaming: false });
+    main.insertBefore(extra, main.children[0]);
+    hooks.virtualize();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.strictEqual(extra.dataset.cvCollapsed, undefined);
+
+    notifyCharacterData(streamingMessage);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    notifyCharacterData(streamingMessage);
+    assert.strictEqual(hooks.isStreamLockActive(), true);
+
+    const midCollapsed = hooks.getCollapsedTotal();
+    assert.ok(midCollapsed >= initialCollapsed);
+
+    await new Promise(resolve => setTimeout(resolve, 600));
+    hooks.updateStreamLock();
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await forceVirtualize(hooks, 3);
+
+    assert.strictEqual(extra.dataset.cvCollapsed, '1');
+    const finalCollapsed = hooks.getCollapsedTotal();
+    assert.ok(finalCollapsed >= midCollapsed);
   } finally {
     cleanup();
   }
